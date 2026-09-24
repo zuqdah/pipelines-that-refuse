@@ -1,0 +1,193 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_VERSION: "1.16.3"
+
+jobs:
+  powershell:
+    name: Analyze and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install tooling
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck
+          Install-Module PSScriptAnalyzer -MinimumVersion 1.22.0 -Force
+
+      # Two separate things have to be true before a clean scan means anything:
+      # the analyzer has to load, and it has to actually run. The first is
+      # asserted here because a crashed analyzer reports zero findings, which
+      # reads exactly like clean code.
+      #
+      # The second is asserted with a canary, and it is not paranoia. Building
+      # this lab, PSScriptAnalyzer 1.25.0 threw "Object reference not set to an
+      # instance of an object" on the FIRST path-based invocation after import
+      # and succeeded on every call after. A step that caught that exception and
+      # carried on would report a clean tree having scanned nothing.
+      #
+      # So a snippet with two known violations is scanned first. It does double
+      # duty: it proves the analyzer still catches what it should, and being the
+      # first call, it absorbs the warm-up that crashes -- verified, the path
+      # scans below stop failing once this runs ahead of them.
+      #
+      # -ScriptDefinition, not a temp file, because Invoke-ScriptAnalyzer has no
+      # -LiteralPath and a file needs writing, encoding and cleaning up for no
+      # gain. The two rules are chosen to be platform-independent: the obvious
+      # canary is an aliased `ls`, and PSAvoidUsingCmdletAliases does not fire
+      # for it on Linux, where ls is a real binary rather than an alias. That
+      # check would have passed locally on Windows and failed only here.
+      - name: Prove the analyzer works, then scan
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module PSScriptAnalyzer -ErrorAction Stop
+
+          if (-not (Get-Command Invoke-ScriptAnalyzer -ErrorAction SilentlyContinue)) {
+            throw 'PSScriptAnalyzer did not load. A scan that cannot run must fail, not pass quietly.'
+          }
+          Write-Host "PSScriptAnalyzer $((Get-Module PSScriptAnalyzer).Version) on PowerShell $($PSVersionTable.PSVersion)"
+
+          # Joined lines rather than a here-string. A PowerShell here-string
+          # must close with '@ at column 0, and column 0 ends a YAML block
+          # scalar -- so the two are mutually exclusive inside a `run:` step.
+          # actionlint catches it as "could not parse as YAML", which does not
+          # obviously point at the here-string.
+          $canaryCode = @(
+            'function Do-Canary {'
+            '    $neverUsed = ''deliberate'''
+            '    return 1'
+            '}'
+          ) -join "`n"
+
+          # Retried because the observed failure was first-invocation only.
+          # Retrying is safe precisely because the canary asserts its result:
+          # a retry that silently returned nothing would still fail below.
+          $canaryFindings = @()
+          foreach ($attempt in 1..3) {
+            try {
+              $canaryFindings = @(Invoke-ScriptAnalyzer -ScriptDefinition $canaryCode -ErrorAction Stop)
+              break
+            } catch {
+              Write-Host "Canary scan attempt $attempt failed: $($_.Exception.Message)"
+              if ($attempt -eq 3) { throw }
+            }
+          }
+
+          $expected = @('PSUseDeclaredVarsMoreThanAssignments', 'PSUseApprovedVerbs')
+          $found = @($canaryFindings.RuleName | Sort-Object -Unique)
+          foreach ($rule in $expected) {
+            if ($rule -notin $found) {
+              throw "The analyzer did not report '$rule' against code that violates it. The scan is not trustworthy, so a clean result on real code proves nothing."
+            }
+          }
+          Write-Host "Canary caught: $($found -join ', '). The analyzer is working."
+
+          $results = @()
+          $results += Invoke-ScriptAnalyzer -Path module -Recurse -ErrorAction Stop
+          $results += Invoke-ScriptAnalyzer -Path tests -Recurse -ErrorAction Stop `
+            -ExcludeRule PSReviewUnusedParameter, PSUseShouldProcessForStateChangingFunctions
+          if (Test-Path scripts) {
+            $results += Invoke-ScriptAnalyzer -Path scripts -Recurse -ErrorAction Stop
+          }
+
+          if ($results.Count) {
+            $results | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message |
+              Out-String -Width 200 | Write-Host
+            throw "PSScriptAnalyzer reported $($results.Count) issue(s)."
+          }
+          Write-Host 'PSScriptAnalyzer is clean.'
+
+      # Every judgement the drill makes about what an observation means is
+      # decided in the module and tested here, with no Azure DevOps
+      # organization in reach. If these ever need a live project, the
+      # separation that makes the drill auditable is gone.
+      - name: Test
+        shell: pwsh
+        run: |
+          Import-Module Pester -MinimumVersion 5.5.0
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = 'testResults.xml'
+          Invoke-Pester -Configuration $config
+
+      # The matrix is the yardstick the live drill is graded against, so a
+      # matrix that declares nothing testable would make the whole run
+      # unfalsifiable while still producing a confident report. Get-GuardMatrix
+      # enforces this; the step exists so it is enforced before anything is
+      # deployed rather than at drill time.
+      - name: Check the guard matrix is coherent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module ./module/PipelineGuards/PipelineGuards.psm1 -Force
+
+          $matrix = Get-GuardMatrix -Path guard-matrix.json
+          $guards = @($matrix.guards)
+          $diverging = @($guards | Where-Object { $_.expectDefault -ne $_.expectHardened })
+          $findings = @($guards | Where-Object { $_.severity -eq 'Finding' })
+          $held = @($guards | Where-Object {
+              $_.expectHardened -in 'RefusedByPolicy', 'RefusedByPermission', 'Blocked', 'Masked'
+            })
+
+          Write-Host "$($guards.Count) guards, $($held.Count) expected to hold, $($diverging.Count) changed by hardening, $($findings.Count) findings configuration cannot close."
+
+          @(
+            '### Guard matrix'
+            ''
+            "**$($guards.Count)** guards across $((@($guards.surface | Sort-Object -Unique)) -join ', ')."
+            ''
+            "- **$($held.Count)** expected to hold in both passes"
+            "- **$($diverging.Count)** expected to change once hardened: $(($diverging.id) -join ', ')"
+            "- **$($findings.Count)** findings configuration cannot close: $(($findings.id) -join ', ')"
+          ) | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: test-results
+          path: testResults.xml
+          if-no-files-found: warn
+
+  terraform:
+    name: Terraform format, validate, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Format
+        run: terraform fmt -check -recursive
+      - name: Validate
+        run: |
+          terraform -chdir=infra init -backend=false -input=false
+          terraform -chdir=infra validate
+      - uses: terraform-linters/setup-tflint@v6
+      - name: Lint
+        run: |
+          tflint --init --config "$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl"
+
+  actions:
+    name: Lint the workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color

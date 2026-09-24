@@ -1,0 +1,18 @@
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+*.auto.tfvars
+
+# Drill output. Written per run, never committed: a report in the repository
+# would be read as the current state of a project that is torn down daily.
+guard-report.json
+guard-report.md
+pipeline-logs/
+testResults.xml
+
+# The agent registration token is the one secret this lab needs. It is scoped
+# to Agent Pools and passed at container run time, so it must never reach a
+# file git can see.
+*.pat
+.env

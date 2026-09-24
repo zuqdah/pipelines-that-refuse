@@ -1,0 +1,152 @@
+{
+  "version": 2,
+  "notes": [
+    "The yardstick. Every guard declares what it expects BEFORE the drill runs, at",
+    "a permissive-but-real policy configuration and again after hardening, so the",
+    "remediation boundary is provable rather than asserted.",
+    "",
+    "'expectDefault' is the configuration where every optional protection on the",
+    "minimum-reviewers policy is left off. That is not a strawman: the provider",
+    "documents reviewer_count as the only required setting and every protection",
+    "below it as defaulting to false, so this is what you get by configuring the",
+    "one thing the policy asks for. 'expectHardened' turns them on.",
+    "",
+    "A guard where the two differ is a control somebody has to know to enable. A",
+    "guard where both say Allowed or Leaked is one that configuration cannot close",
+    "at all, and those are reported as findings rather than failures.",
+    "",
+    "Outcomes are deliberately not booleans. 'Refused' is not one thing: a push",
+    "blocked by branch policy and a push blocked by a failed login look identical",
+    "to an exit code, and only one of them is the control working."
+  ],
+
+  "outcomes": {
+    "Allowed": "The operation completed. For a guard expecting refusal, the control did not hold.",
+    "RefusedByPolicy": "Refused by a branch policy or an environment check. This is the control working.",
+    "RefusedByPermission": "Refused by an access control entry rather than a policy. A related but separate subsystem.",
+    "AuthFailure": "Refused before any policy was consulted. Proves nothing about the control and must never count as a pass.",
+    "Blocked": "A deployment stopped pending approval and did not execute.",
+    "Masked": "A secret was replaced with asterisks in the log.",
+    "Leaked": "A secret reached the log in a readable form.",
+    "Unknown": "The outcome could not be classified. Always a failure, never a pass."
+  },
+
+  "identities": {
+    "author": "Opens pull requests and pushes. Holds no policy exemption.",
+    "reviewer": "Approves pull requests. Exists because a submitter cannot approve their own work, so a single identity cannot produce an approval to then make stale.",
+    "exempt": "Holds PolicyExempt. Exists only to prove the exemption works and to put a name on who would hold it."
+  },
+
+  "guards": [
+    {
+      "id": "push-to-protected-branch",
+      "title": "A direct push to main is refused",
+      "surface": "git",
+      "identity": "author",
+      "expectDefault": "RefusedByPolicy",
+      "expectHardened": "RefusedByPolicy",
+      "severity": "Critical",
+      "why": "The whole point of a protected branch. If this passes, nothing else on the list matters, because every other control can be walked around by committing straight to main."
+    },
+    {
+      "id": "force-push-to-protected-branch",
+      "title": "A force push to main is refused",
+      "surface": "git",
+      "identity": "author",
+      "expectDefault": "RefusedByPermission",
+      "expectHardened": "RefusedByPermission",
+      "severity": "Critical",
+      "why": "A force push rewrites the history that reviews and pipeline runs are pinned to. Expected to be refused by PERMISSION, not by policy: force push is governed by the ForcePush access control entry, and hardening branch policies says nothing about it. Conflating the two is how a team concludes its policy work covered this."
+    },
+    {
+      "id": "delete-protected-branch",
+      "title": "Deleting main is refused",
+      "surface": "git",
+      "identity": "author",
+      "expectDefault": "RefusedByPermission",
+      "expectHardened": "RefusedByPermission",
+      "severity": "High",
+      "why": "Deleting the branch removes the policies attached to it. A control that can be deleted by the identity it constrains is not a control."
+    },
+    {
+      "id": "complete-pr-without-approval",
+      "title": "Completing a pull request with no approval is refused",
+      "surface": "api",
+      "identity": "author",
+      "expectDefault": "RefusedByPolicy",
+      "expectHardened": "RefusedByPolicy",
+      "severity": "Critical",
+      "why": "Tested against the REST API rather than the web UI on purpose. The UI disables the complete button when policies are unmet, which proves the button is disabled; the API will accept the request and let the server decide."
+    },
+    {
+      "id": "self-approve-own-pr",
+      "title": "The author's own approval does not satisfy the reviewer requirement",
+      "surface": "api",
+      "identity": "author",
+      "expectDefault": "RefusedByPolicy",
+      "expectHardened": "RefusedByPolicy",
+      "severity": "High",
+      "why": "Refused in both passes because submitter_can_vote is left at its documented default of false. Included so the drill proves it rather than assuming it, and so the reviewer identity below is justified rather than incidental."
+    },
+    {
+      "id": "stale-approval-survives-new-commit",
+      "title": "An approval granted before the code changed still completes the pull request",
+      "surface": "api",
+      "identity": "author",
+      "expectDefault": "Allowed",
+      "expectHardened": "RefusedByPolicy",
+      "severity": "High",
+      "why": "The finding that matters most. on_push_reset_approved_votes defaults to false, so a reviewer approves one diff and the pull request completes carrying that approval over a different one. The policy page reads as configured and enforced either way, and the review that a human actually performed is not the change that shipped."
+    },
+    {
+      "id": "complete-over-outstanding-rejection",
+      "title": "A pull request completes while a reviewer has voted to reject",
+      "surface": "api",
+      "identity": "author",
+      "expectDefault": "Allowed",
+      "expectHardened": "RefusedByPolicy",
+      "severity": "High",
+      "why": "allow_completion_with_rejects_or_waits is the second protection that is off unless someone knows to turn it on. A reviewer who read the change and said no is overridden by the approval count being satisfied elsewhere."
+    },
+    {
+      "id": "deploy-without-environment-approval",
+      "title": "A deployment to a checked environment stops before it runs",
+      "surface": "pipeline",
+      "identity": "author",
+      "expectDefault": "Blocked",
+      "expectHardened": "Blocked",
+      "severity": "Critical",
+      "why": "An approval that lets the job start and asks afterwards is theatre. The check is that the deployment job did not execute, not that a request appeared -- and 'did not execute' has to be read off the job record, because a pipeline that failed to compile also never deployed."
+    },
+    {
+      "id": "policy-exempt-push",
+      "title": "An identity holding PolicyExempt pushes straight to main",
+      "surface": "git",
+      "identity": "exempt",
+      "expectDefault": "Allowed",
+      "expectHardened": "Allowed",
+      "severity": "Finding",
+      "why": "Expected to succeed in both passes, which is the point. 'Bypass policies when pushing' is an access control entry that overrides every branch policy, and no policy configuration closes it -- only group membership does. Hardening cannot fix this guard, so the report names who holds it instead of pretending it is closed."
+    },
+    {
+      "id": "secret-masked-in-log",
+      "title": "A secret echoed to the log is masked",
+      "surface": "pipeline",
+      "identity": "author",
+      "expectDefault": "Masked",
+      "expectHardened": "Masked",
+      "severity": "Medium",
+      "why": "The baseline everybody has watched work. It is here so the next guard means something: without proving masking works on the plain value, proving it fails on a transformed one is not a finding, it is a broken pipeline."
+    },
+    {
+      "id": "secret-masking-defeated-by-transform",
+      "title": "The same secret, base64-encoded, reaches the log in the clear",
+      "surface": "pipeline",
+      "identity": "author",
+      "expectDefault": "Leaked",
+      "expectHardened": "Leaked",
+      "severity": "Finding",
+      "why": "Masking is a string replacement over log output. Encode the value, reverse it, or print it one character at a time and it goes straight through. Expected to leak in both passes: this is not a misconfiguration to fix but a property of how masking works, and a pipeline treating masking as a control against the code it runs is mistaken about what it bought."
+    }
+  ]
+}

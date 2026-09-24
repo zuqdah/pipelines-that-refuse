@@ -1,0 +1,30 @@
+directory:
+  - infra
+framework:
+  - terraform
+  - github_actions
+quiet: true
+compact: true
+
+skip-check:
+  # CKV_GHA_7 wants workflow_dispatch inputs empty so build output cannot be
+  # influenced by a caller. This workflow builds nothing, and its input selects
+  # which phase of the assessment to run.
+  - CKV_GHA_7
+
+  # CKV_AZURE_50 wants virtual machine extensions disabled. This lab reaches
+  # the domain controller exclusively through Run Command, which is an
+  # extension, and that is the deliberate trade: extensions stay enabled so
+  # that the machine needs no public IP and no inbound security rule at all.
+  # Disabling them would mean opening RDP to get a shell, which is a worse
+  # exposure than the one this check is guarding against.
+  - CKV_AZURE_50
+
+  # CKV_AZURE_151 wants encryption at host. Microsoft.Compute/EncryptionAtHost
+  # reports NotRegistered on this subscription, so setting it would fail at
+  # apply time, and registering it is a subscription-wide change a lab has no
+  # business making -- the same reason this configuration sets
+  # resource_provider_registrations to none. The managed disk is already
+  # encrypted at rest with platform-managed keys, and it exists for about
+  # twenty-five minutes.
+  - CKV_AZURE_151
