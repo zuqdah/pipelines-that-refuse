@@ -64,7 +64,7 @@
       "expectDefault": "RefusedByPermission",
       "expectHardened": "RefusedByPermission",
       "severity": "High",
-      "why": "Exists because the protected-branch guard cannot test what it was written to test. A blocking policy refuses a force push before the ForcePush access control entry is reached, so the only place that entry is observable is a branch carrying no policy. Expected to be refused in both passes: ForcePush is denied to the identities under test at the repository level, and hardening a branch policy does not touch it."
+      "why": "Exists because the protected-branch guard cannot test what it was written to test: a blocking policy refuses a force push before the ForcePush access control entry is reached, so the only place that entry is observable is a branch carrying no policy. The branch is created by the REVIEWER and force pushed by the AUTHOR, because when the author created it the force push succeeded despite the deny -- Azure DevOps appears to grant the creator of a branch elevated rights on it, and a branch-scoped allow outranks a repository-scoped deny. Splitting the identities tests the permission rather than that hypothesis."
     },
     {
       "id": "delete-protected-branch",

@@ -471,24 +471,50 @@ Set-Observation -Id 'force-push-to-protected-branch' -Outcome $verdict.Outcome -
 # works and says nothing about the permission -- which was what it was written
 # to test.
 $unprotected = "drill/unprotected-$([guid]::NewGuid().ToString('N').Substring(0,6))"
-$null = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('checkout', '-b', $unprotected)
-Set-DrillFileContent -Directory $authorClone -Text "unprotected-$(Get-Random)"
-Invoke-DrillCommit -Identity 'author' -Directory $authorClone -Message 'Seed a branch with no policy on it'
-$seedPush = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('push', '-u', 'origin', $unprotected)
+
+# The branch is created by the REVIEWER and force pushed by the AUTHOR, on
+# purpose.
+#
+# Run 8 had the author create it and force push to it, and the push succeeded
+# despite ForcePush being denied to the author at the repository level. The
+# likely explanation is that Azure DevOps grants the creator of a branch
+# elevated permissions on that branch, and a branch-scoped allow is more
+# specific than a repository-scoped deny. That is a hypothesis, not a
+# confirmed mechanism.
+#
+# Splitting the identities tests the permission rather than the hypothesis: the
+# author is not the creator here, so no creator grant can be in play, and a
+# refusal is attributable to the deny. If this is now refused, the creator
+# grant is what let the previous version through -- which is worth knowing
+# either way, because it means a repository-wide ForcePush deny does not stop
+# somebody rewriting a branch they made themselves.
+$reviewerClone = New-DrillClone -Identity 'reviewer'
+$null = Invoke-Git -Identity 'reviewer' -WorkingDirectory $reviewerClone -Arguments @('checkout', '-b', $unprotected)
+Set-DrillFileContent -Directory $reviewerClone -Text "unprotected-$(Get-Random)"
+Invoke-DrillCommit -Identity 'reviewer' -Directory $reviewerClone -Message 'Seed a branch with no policy on it'
+$seedPush = Invoke-Git -Identity 'reviewer' -WorkingDirectory $reviewerClone -Arguments @('push', '-u', 'origin', $unprotected)
 
 if ($seedPush.ExitCode -ne 0) {
     # A topic branch carries no policy, so this must succeed. If it does not,
     # the force push below has nothing to rewrite and a refusal would be
     # crediting the permission for a push that never happened.
     Set-Observation -Id 'force-push-to-unprotected-branch' -Outcome 'Unknown' `
-        -Reason "Could not create the unprotected branch, so there was nothing to force push over: $($seedPush.Stderr)"
+        -Reason "The reviewer could not create the unprotected branch, so there was nothing for the author to force push over: $($seedPush.Stderr)"
 } else {
+    $null = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('fetch', 'origin', $unprotected)
+    $null = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('checkout', '-B', $unprotected, "origin/$unprotected")
+
     # Rewrite the branch's history, which is what ForcePush governs.
     Set-DrillFileContent -Directory $authorClone -Text "unprotected-amended-$(Get-Random)"
-    $null = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('commit', '--amend', '--no-edit', '-a')
-    $forceUnprotected = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('push', '--force', 'origin', $unprotected)
-    $verdict = Resolve-PushOutcome -ExitCode $forceUnprotected.ExitCode -Stderr $forceUnprotected.Stderr -Stdout $forceUnprotected.Stdout
-    Set-Observation -Id 'force-push-to-unprotected-branch' -Outcome $verdict.Outcome -Reason $verdict.Reason
+    $amend = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('commit', '--amend', '--no-edit', '-a')
+    if ($amend.ExitCode -ne 0) {
+        Set-Observation -Id 'force-push-to-unprotected-branch' -Outcome 'Unknown' `
+            -Reason "Could not rewrite history locally, so the push would have been an ordinary fast-forward and would not have exercised ForcePush at all: $($amend.Stderr)"
+    } else {
+        $forceUnprotected = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('push', '--force', 'origin', $unprotected)
+        $verdict = Resolve-PushOutcome -ExitCode $forceUnprotected.ExitCode -Stderr $forceUnprotected.Stderr -Stdout $forceUnprotected.Stdout
+        Set-Observation -Id 'force-push-to-unprotected-branch' -Outcome $verdict.Outcome -Reason $verdict.Reason
+    }
 }
 
 $null = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('checkout', $branchShort)
@@ -590,8 +616,30 @@ function Test-DrillCompletion {
     [OutputType([pscustomobject])]
     param([Parameter(Mandatory)][int] $PullRequestId)
 
-    $current = Invoke-Ado -Identity 'author' `
-        -Uri "$organization/$projectName/_apis/git/repositories/$repositoryId/pullrequests/$PullRequestId`?api-version=$script:ApiVersion"
+    # Wait for the merge to be recomputed before asking to complete.
+    #
+    # Azure DevOps recalculates the merge whenever the source branch moves, and
+    # a completion requested while mergeStatus is 'queued' comes back 409. Run 8
+    # reported the stale-approval guard as Unknown for exactly that reason: it
+    # pushed a commit and asked to complete immediately, and a 409 about timing
+    # is indistinguishable from a 409 about a policy unless you wait.
+    $current = $null
+    foreach ($i in 1..20) {
+        $current = Invoke-Ado -Identity 'author' `
+            -Uri "$organization/$projectName/_apis/git/repositories/$repositoryId/pullrequests/$PullRequestId`?api-version=$script:ApiVersion"
+        if ($current.StatusCode -ne 200) { break }
+
+        $mergeStatus = if ($current.Body.PSObject.Properties.Name -contains 'mergeStatus') {
+            [string]$current.Body.mergeStatus
+        } else { '' }
+
+        # 'succeeded' means the merge is computed and completion can be judged
+        # on its merits. 'conflicts' and 'failure' are terminal too -- waiting
+        # longer would not change them.
+        if ($mergeStatus -in 'succeeded', 'conflicts', 'failure') { break }
+        Start-Sleep -Seconds 3
+    }
+
     if ($current.StatusCode -ne 200) {
         return Resolve-PullRequestOutcome -StatusCode $current.StatusCode -Body $current.Raw
     }
@@ -645,11 +693,27 @@ function Get-DrillPolicyState {
 
     $projectId = Get-TfValue 'project_id'
     $artifact = "vstfs:///CodeReview/CodeReviewId/$projectId/$PullRequestId"
-    $uri = "$organization/$projectName/_apis/policy/evaluations?artifactId=$([uri]::EscapeDataString($artifact))&api-version=$script:ApiVersion"
+    $encoded = [uri]::EscapeDataString($artifact)
 
-    $result = Invoke-Ado -Identity 'author' -Uri $uri
-    if ($result.StatusCode -ne 200 -or $null -eq $result.Body.value) {
-        Write-Information "  (policy evaluations unreadable: HTTP $($result.StatusCode))"
+    # Both api-versions, preview first. policy/evaluations is preview-only and
+    # answers 7.1 with HTTP 400 -- the same split that caught connectionData,
+    # and it cost run 8 four guards: every evaluation came back unreadable, so
+    # every 403 stayed classified as an access failure. Trying both means a
+    # future promotion to GA does not break this, and a failure of both is
+    # reported rather than assumed away.
+    $result = $null
+    foreach ($version in '7.1-preview.1', $script:ApiVersion) {
+        $attempt = Invoke-Ado -Identity 'author' `
+            -Uri "$organization/$projectName/_apis/policy/evaluations?artifactId=$encoded&api-version=$version"
+        if ($attempt.StatusCode -eq 200) {
+            $result = $attempt
+            break
+        }
+        Write-Information "  (policy evaluations at api-version $version returned HTTP $($attempt.StatusCode))"
+    }
+
+    if ($null -eq $result -or $null -eq $result.Body.value) {
+        Write-Information '  (policy evaluations unreadable at any api-version)'
         return 'Unknown'
     }
 
