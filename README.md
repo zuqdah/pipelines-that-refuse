@@ -158,7 +158,26 @@ The four drill identities use four of them, and they are released on teardown.
 
 ## Running it
 
-One bootstrap, then the drill is a button.
+```bash
+scripts/bootstrap.sh --org zuqdah-labs
+```
+
+That does everything below except step 1 and the agent token: it creates the
+orchestrator application and its federated credential, grants and consents the
+Graph permission, adds the principal to the organization and to Project
+Collection Administrators, and sets the repository variables and environment.
+It is re-runnable — everything it creates is looked up first — and it needs
+only `az` and `gh`, since both parse JSON themselves.
+
+Where a preview endpoint refuses it, it says exactly what to click rather than
+carrying on and letting the first `terraform apply` fail on an authorization
+error.
+
+It deliberately does **not** create the agent's personal access token. A token
+cannot be minted through the API without a token, and a script asking for one
+in order to create another would be theatre.
+
+The manual equivalent, and what each step is for:
 
 **1. An organization.** Create one at
 [dev.azure.com](https://dev.azure.com) — an empty one; Terraform creates the
@@ -251,6 +270,17 @@ its log rather than assuming registration succeeded.
 through `"$(cat)"` inside a `for` loop. The pipe is consumed on the first
 iteration, so every retry would have passed an empty token and left exactly the
 phantom agent the loop existed to prevent.
+
+**One api-version is not enough, and the wrong one looks like an auth
+problem.** Azure DevOps ships some 7.1 endpoints as GA and others as preview
+only. `connectionData` — which the drill calls to learn the identity id it needs
+in order to vote — is preview, while `projects`, `builds`, pull requests and
+pipeline runs are not. Asking for `7.1` returns a 400 about the version, and the
+bootstrap script's own preflight was written to treat any failure there as "the
+organization is not Entra-backed". So the first thing the script did was reject
+a perfectly good organization and send the reader off to check a setting that
+was already correct. Found by calling it against the real organization rather
+than by reasoning about it.
 
 **A here-string cannot live in a YAML block scalar.** A PowerShell here-string
 must close with `'@` at column 0, and column 0 ends a YAML block. `actionlint`

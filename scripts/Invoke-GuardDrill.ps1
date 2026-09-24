@@ -63,6 +63,19 @@ Import-Module (Join-Path -Path $PSScriptRoot -ChildPath '../module/PipelineGuard
 $script:AdoResource = '499b84ac-1321-427f-aa17-267ca6975798'
 $script:ApiVersion = '7.1'
 
+# One constant is not enough. Azure DevOps ships some endpoints as GA at 7.1
+# and others as preview only, and asking for the wrong one is a 400 whose
+# message names the version rather than anything about the request:
+#
+#   The requested version "7.1" of the resource is under preview. The -preview
+#   flag must be supplied in the api-version for such requests.
+#
+# connectionData is preview; projects, builds, pull requests and pipeline runs
+# are not. This was found by calling connectionData against the real
+# organization, where it would otherwise have failed on the live run and been
+# read as an authentication problem.
+$script:PreviewApiVersion = '7.1-preview'
+
 # ---------------------------------------------------------------- terraform
 
 $tfRaw = [System.IO.File]::ReadAllText($TerraformOutput)
@@ -230,7 +243,7 @@ function Get-AdoIdentityId {
     [OutputType([string])]
     param([Parameter(Mandatory)][string] $Identity)
 
-    $result = Invoke-Ado -Identity $Identity -Uri "$organization/_apis/connectionData?api-version=$script:ApiVersion"
+    $result = Invoke-Ado -Identity $Identity -Uri "$organization/_apis/connectionData?api-version=$script:PreviewApiVersion"
     if ($result.StatusCode -ne 200) {
         throw "connectionData returned $($result.StatusCode) for '$Identity'. Without an identity id this drill cannot vote, and a guard that cannot run must fail rather than pass quietly."
     }
