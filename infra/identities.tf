@@ -77,15 +77,32 @@ resource "azuread_application_federated_identity_credential" "drill" {
 # Each identity has to exist in the organization before it can be given
 # permissions or asked to vote. express is the Basic licence; a new
 # organization includes five of them free, and this lab uses three.
+# A service principal is not visible to Azure DevOps the instant Entra returns
+# it. On the second live run, two of the four entitlements failed with:
+#
+#   VS403283: Could not add user '<id>' at this time
+#
+# That is a hard error, not a timeout, so the entitlement's own create timeout
+# does nothing for it -- Terraform does not retry a 5000. Waiting is crude but
+# it is the honest shape of the problem: there is nothing to poll, because the
+# principal exists in Entra and simply has not propagated to the other service.
+resource "time_sleep" "principals_propagate" {
+  depends_on      = [azuread_service_principal.drill]
+  create_duration = "90s"
+}
+
 resource "azuredevops_service_principal_entitlement" "drill" {
   for_each = local.drill_identities
 
   origin_id            = azuread_service_principal.drill[each.key].object_id
   account_license_type = "express"
 
-  # The entitlement is created from the Entra object id, and Azure DevOps takes
-  # a moment to materialise the graph subject behind it. Everything downstream
-  # references .descriptor, which does not resolve until it has.
+  depends_on = [time_sleep.principals_propagate]
+
+  # Kept alongside the wait rather than instead of it. The wait covers
+  # propagation; this covers the entitlement call itself being slow, which is a
+  # different thing. Everything downstream references .descriptor, which does
+  # not resolve until the graph subject materialises.
   timeouts {
     create = "10m"
   }

@@ -109,12 +109,35 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $InformationPreference = 'Continue'
 
-          $apps = az ad app list --filter "startswith(displayName,'guard-drill-')" -o json | ConvertFrom-Json
-          if (-not @($apps).Count) {
-            Write-Information 'No abandoned drill applications found.'
-            return
+          # Deleted by OBJECT id, not appId. "az ad app delete --id <appId>"
+          # resolves the value as an identifier URI and fails with
+          # "Application with identifier URI '<appId>' doesn't exist" -- which
+          # reads like the application is already gone. Cleaning up after the
+          # second live run by hand is how that surfaced, and this sweep had the
+          # same bug: the safety net would have reported success while leaving
+          # every application in place.
+          #
+          # Retried because two deletions also returned silently without
+          # deleting on the first attempt and worked on the second.
+          foreach ($attempt in 1..3) {
+            $apps = @(az ad app list --filter "startswith(displayName,'guard-drill-')" -o json | ConvertFrom-Json)
+            if (-not $apps.Count) {
+              Write-Information 'No abandoned drill applications remain.'
+              break
+            }
+            Write-Information "$($apps.Count) abandoned application(s) on attempt ${attempt}."
+            foreach ($app in $apps) {
+              Write-Information "  deleting '$($app.displayName)' (object $($app.id))"
+              az ad app delete --id $app.id 2>$null
+            }
+            Start-Sleep -Seconds 10
           }
-          foreach ($app in $apps) {
-            Write-Information "Deleting abandoned application '$($app.displayName)' ($($app.appId))."
-            az ad app delete --id $app.appId
+
+          # Verified by asking, not by trusting the delete calls. Every lab in
+          # this series checks its own teardown against the service.
+          $left = @(az ad app list --filter "startswith(displayName,'guard-drill-')" -o json | ConvertFrom-Json)
+          if ($left.Count) {
+            $left | ForEach-Object { Write-Output "  still present: $($_.displayName) ($($_.id))" }
+            throw "$($left.Count) drill application(s) could not be deleted."
           }
+          Write-Information 'Entra is clean.'

@@ -72,15 +72,34 @@ jobs:
       - name: Build the agent image
         run: docker build -t guard-drill-agent:local agent
 
+      # Retried once, deliberately. Two of the three failures on the second live
+      # run were transient by nature -- VS403283 "could not add user at this
+      # time" and TF400898 "an internal error occurred" -- and Terraform's state
+      # makes a second apply resume rather than start over. A retry is not
+      # papering over them: the wait in identities.tf addresses the propagation
+      # cause, and this covers the service being briefly unwilling anyway.
+      #
+      # Everything goes through scripts/tf.sh, which mints a fresh OIDC token
+      # per invocation so no provider consults its own auth cache.
       - name: Apply the permissive configuration
         id: apply
         run: |
-          terraform -chdir=infra init -input=false
-          terraform -chdir=infra apply -auto-approve -input=false \
-            -var 'pass=permissive' \
-            -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
-            -var "github_oidc_subject=${{ steps.subject.outputs.value }}"
-          terraform -chdir=infra output -json > tf-output.json
+          ./scripts/tf.sh -chdir=infra init -input=false
+          for attempt in 1 2; do
+            if ./scripts/tf.sh -chdir=infra apply -auto-approve -input=false \
+                -var 'pass=permissive' \
+                -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
+                -var "github_oidc_subject=${{ steps.subject.outputs.value }}"; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              echo "::error::Apply failed twice. The second failure is above."
+              exit 1
+            fi
+            echo "::warning::Apply failed on attempt 1. Waiting 60s and resuming once."
+            sleep 60
+          done
+          ./scripts/tf.sh -chdir=infra output -json > tf-output.json
 
       # Started after the apply, because the pool it registers into is created
       # by it. The token is the one secret in this lab: scoped to Agent Pools
@@ -133,7 +152,7 @@ jobs:
       - name: Apply the hardened configuration
         if: inputs.passes == 'both' || inputs.passes == 'hardened'
         run: |
-          terraform -chdir=infra apply -auto-approve -input=false \
+          ./scripts/tf.sh -chdir=infra apply -auto-approve -input=false \
             -var 'pass=hardened' \
             -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
             -var "github_oidc_subject=${{ steps.subject.outputs.value }}"
@@ -176,13 +195,27 @@ jobs:
           docker stop guard-agent || true
           docker logs guard-agent 2>&1 | tail -30 || true
 
+      # Retried like the apply, and for a stronger reason: a destroy that fails
+      # leaves a project, an agent pool and four Entra applications behind, and
+      # the next run then collides with a project name that already exists.
+      # That is exactly what happened on the second live run.
       - name: Destroy
         if: always() && !inputs.keep
         run: |
-          terraform -chdir=infra destroy -auto-approve -input=false \
-            -var 'pass=permissive' \
-            -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
-            -var "github_oidc_subject=${{ steps.subject.outputs.value }}"
+          for attempt in 1 2; do
+            if ./scripts/tf.sh -chdir=infra destroy -auto-approve -input=false \
+                -var 'pass=permissive' \
+                -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
+                -var "github_oidc_subject=${{ steps.subject.outputs.value }}"; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              echo "::error::Destroy failed twice. The nightly Destroy workflow sweeps what is left."
+              exit 1
+            fi
+            echo "::warning::Destroy failed on attempt 1. Waiting 30s and retrying."
+            sleep 30
+          done
 
       # Verified against the service, not inferred from the destroy step's exit
       # code. Every lab in this series checks its own teardown, because a

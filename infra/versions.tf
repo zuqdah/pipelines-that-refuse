@@ -14,6 +14,13 @@ terraform {
       source  = "hashicorp/random"
       version = "~> 3.9"
     }
+    # Only for a deliberate wait between Entra and Azure DevOps. See
+    # identities.tf: a service principal is not visible to Azure DevOps the
+    # instant Entra returns it.
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.13"
+    }
   }
 }
 
