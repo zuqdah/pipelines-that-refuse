@@ -212,8 +212,8 @@ manage)** only. Nothing else. This is the one secret.
 | Kind | Name | Value |
 |---|---|---|
 | Variable | `ADO_ORGANIZATION` | the organization name, e.g. `zuqdah-labs` |
-| Variable | `AZURE_CLIENT_ID` | the orchestrator's client id |
-| Variable | `AZURE_TENANT_ID` | the tenant id |
+| Secret | `AZURE_CLIENT_ID` | the orchestrator's client id |
+| Secret | `AZURE_TENANT_ID` | the tenant id (a secret so it is masked in public logs) |
 | Secret | `AZP_TOKEN` | the Agent Pools token |
 | Environment | `lab` | must exist — its name is in the OIDC subject claim |
 

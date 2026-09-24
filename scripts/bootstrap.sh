@@ -257,10 +257,40 @@ fi
 
 say "Configuring the repository"
 
-gh variable set ADO_ORGANIZATION --repo "$REPO" --body "$ORG" >/dev/null
-gh variable set AZURE_CLIENT_ID --repo "$REPO" --body "$APP_ID" >/dev/null
-gh variable set AZURE_TENANT_ID --repo "$REPO" --body "$TENANT_ID" >/dev/null
-note "Set ADO_ORGANIZATION, AZURE_CLIENT_ID, AZURE_TENANT_ID"
+# A repository created moments earlier returns 403 on its first Actions
+# variable or secret write while GitHub settles permissions, and the message
+# blames repository write access rather than timing -- which sends the reader
+# to check a token scope that was already correct. Retried rather than
+# explained, because the explanation would have been wrong.
+gh_write() {
+  local what="$1"
+  shift
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$attempt" -lt 5 ]; then
+      note "Setting ${what} failed (attempt ${attempt}), retrying in 5s"
+      sleep 5
+    fi
+  done
+  echo "Could not set ${what} after five attempts. The error follows:" >&2
+  # Run once more without suppressing output, so the real reason is visible
+  # instead of a summary of five silent failures.
+  "$@" || true
+  return 1
+}
+
+gh_write "variable ADO_ORGANIZATION" gh variable set ADO_ORGANIZATION --repo "$REPO" --body "$ORG"
+# Secrets, not variables. Neither is a credential on its own -- a client id
+# and a tenant id grant nothing without a token -- but GitHub masks secrets in
+# workflow logs and does not mask variables, and this repository is public.
+# The tenant id identifies the directory these labs run in, which is not
+# something to publish in plain text in a log for the sake of a convention.
+gh_write "secret AZURE_CLIENT_ID" gh secret set AZURE_CLIENT_ID --repo "$REPO" --body "$APP_ID"
+gh_write "secret AZURE_TENANT_ID" gh secret set AZURE_TENANT_ID --repo "$REPO" --body "$TENANT_ID"
+note "Set variable ADO_ORGANIZATION; set secrets AZURE_CLIENT_ID, AZURE_TENANT_ID"
 
 # The environment is not decoration: its name is inside the OIDC subject the
 # federated credential trusts. Without it the workflow cannot run, and the
