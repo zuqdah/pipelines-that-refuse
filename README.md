@@ -194,9 +194,17 @@ as, federated to this repository:
 az ad app create --display-name pipelines-that-refuse-orchestrator
 # then add a federated credential with:
 #   issuer   https://token.actions.githubusercontent.com
-#   subject  repo:<owner>/pipelines-that-refuse:environment:lab
 #   audience api://AzureADTokenExchange
+#   subject  repo:<owner>@<OWNER_ID>/pipelines-that-refuse@<REPO_ID>:environment:lab
 ```
+
+**The subject must be the immutable form**, with GitHub's numeric ids — not the
+portable `repo:<owner>/<repo>:environment:lab` that most documentation shows.
+GitHub presents the immutable form, Entra matches the subject as an exact
+string, and the first live run of this lab died on `AADSTS700213` proving it.
+The ids come from `gh api repos/<owner>/<repo> -q '.owner.id, .id'`, and both
+the bootstrap script and the workflows build the subject from them so the two
+sides cannot drift.
 
 It needs enough Entra permission to create applications
 (`Application.Administrator`, or `Application.ReadWrite.All` granted to the
@@ -281,6 +289,27 @@ organization is not Entra-backed". So the first thing the script did was reject
 a perfectly good organization and send the reader off to check a setting that
 was already correct. Found by calling it against the real organization rather
 than by reasoning about it.
+
+**The OIDC subject format, which my own notes had already recorded.** The first
+live run failed at `terraform apply` with `AADSTS700213`: GitHub presented
+`repo:zuqdah@32742234/pipelines-that-refuse@1385752564:environment:lab` against
+a credential registered for the portable `repo:owner/repo:environment:lab`. An
+earlier lab in this series had hit exactly this and written it down. I read
+those notes before starting, then wrote the portable form anyway and described
+the immutable one as an optional alternative in a comment. Both workflows now
+compose the subject from `github.repository_owner_id` and
+`github.repository_id`, and the variable has a validation rule that refuses the
+portable form — because Entra's refusal names the credential rather than the
+format, and every guard would have reported `AuthFailure`.
+
+**A check block that always failed, quietly.** The assertion tying the
+pipeline's environment name to the Terraform variable used
+`regex("environment:\\s*NAME\\s*$")`. Terraform's `regex` anchors `$` to the end
+of the **string**, not the end of a line, so it only matched if the environment
+was named on the file's last line. It never was. The check therefore failed on
+every apply — as a *warning*, which `terraform apply` prints and carries on
+past. A check that always fails is as useless as one that always passes and
+quieter about it. Now `contains()` over trimmed lines, with no regex.
 
 **A here-string cannot live in a YAML block scalar.** A PowerShell here-string
 must close with `'@` at column 0, and column 0 ends a YAML block. `actionlint`

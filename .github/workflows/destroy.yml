@@ -41,6 +41,15 @@ jobs:
           terraform_version: "1.16.3"
           terraform_wrapper: false
 
+      # Must match the drill's, and for the same reason: Entra matches the
+      # subject as an exact string, and the immutable form is what GitHub
+      # actually presents.
+      - name: Compose the OIDC subject
+        id: subject
+        run: |
+          name="${GITHUB_REPOSITORY#*/}"
+          echo "value=repo:${GITHUB_REPOSITORY_OWNER}@${{ github.repository_owner_id }}/${name}@${{ github.repository_id }}:environment:lab" >> "$GITHUB_OUTPUT"
+
       # Local state, so a scheduled run starts with nothing to destroy unless
       # the drill's state was persisted. That is deliberate: this workflow's
       # real job is the sweep below, which asks the service what exists rather
@@ -51,7 +60,7 @@ jobs:
           terraform -chdir=infra destroy -auto-approve -input=false \
             -var 'pass=permissive' \
             -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
-            -var 'github_oidc_subject=repo:${{ github.repository }}:environment:lab' \
+            -var "github_oidc_subject=${{ steps.subject.outputs.value }}" \
           || echo 'Nothing in state to destroy.'
 
       # The part that matters. Terraform can only remove what its state knows

@@ -48,17 +48,33 @@ variable "reviewer_count" {
 variable "github_oidc_subject" {
   description = <<-EOT
     The subject claim GitHub Actions presents, which the federated credentials
-    trust. All three drill identities federate the same subject: they are
+    trust. All four drill identities federate the same subject: they are
     distinguished by which client id the drill authenticates as, not by where
     the token came from.
 
-    The portable form is repo:OWNER/REPO:environment:ENVIRONMENT. The other labs
-    in this series use the immutable form, repo:OWNER@OWNERID/REPO@REPOID:...,
-    which survives the repository being renamed. Either works; the immutable one
-    cannot be written until the repository exists.
+    It must be the IMMUTABLE form:
+
+      repo:OWNER@OWNERID/REPO@REPOID:environment:ENVIRONMENT
+
+    not the portable repo:OWNER/REPO:environment:ENVIRONMENT. This is not a
+    preference. The first live run failed with AADSTS700213 because GitHub
+    presented 'repo:zuqdah@32742234/pipelines-that-refuse@1385752564:environment:lab'
+    against a credential registered for the portable form, and Entra matches
+    the subject as an exact string.
+
+    The workflow composes it from github.repository_owner_id and
+    github.repository_id, so there is nothing to keep in sync by hand. There is
+    deliberately no default: a wrong default here produces an authentication
+    failure whose message points at the credential rather than at the value,
+    and every guard would report AuthFailure -- which looks like a very well
+    protected repository.
   EOT
   type        = string
-  default     = "repo:zuqdah/pipelines-that-refuse:environment:lab"
+
+  validation {
+    condition     = can(regex("^repo:[^/@]+@[0-9]+/[^/@]+@[0-9]+:", var.github_oidc_subject))
+    error_message = "github_oidc_subject must use the immutable form repo:OWNER@OWNERID/REPO@REPOID:... The portable form is silently refused by Entra at token exchange, not here."
+  }
 }
 
 variable "environment_name" {

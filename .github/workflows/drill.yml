@@ -52,6 +52,23 @@ jobs:
           terraform_version: "1.16.3"
           terraform_wrapper: false
 
+      # The subject Entra must trust, composed from the ids GitHub hands the
+      # job rather than written out by hand.
+      #
+      # It has to be the immutable form. The first live run failed with
+      # AADSTS700213 against a credential registered for the portable
+      # repo:OWNER/REPO:... because GitHub actually presents
+      # repo:OWNER@OWNERID/REPO@REPOID:..., and Entra matches the subject as an
+      # exact string. Composing it here means the federated credentials and the
+      # presented assertion cannot drift.
+      - name: Compose the OIDC subject
+        id: subject
+        run: |
+          name="${GITHUB_REPOSITORY#*/}"
+          subject="repo:${GITHUB_REPOSITORY_OWNER}@${{ github.repository_owner_id }}/${name}@${{ github.repository_id }}:environment:lab"
+          echo "value=${subject}" >> "$GITHUB_OUTPUT"
+          echo "Subject: ${subject}"
+
       - name: Build the agent image
         run: docker build -t guard-drill-agent:local agent
 
@@ -62,7 +79,7 @@ jobs:
           terraform -chdir=infra apply -auto-approve -input=false \
             -var 'pass=permissive' \
             -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
-            -var 'github_oidc_subject=repo:${{ github.repository }}:environment:lab'
+            -var "github_oidc_subject=${{ steps.subject.outputs.value }}"
           terraform -chdir=infra output -json > tf-output.json
 
       # Started after the apply, because the pool it registers into is created
@@ -119,7 +136,7 @@ jobs:
           terraform -chdir=infra apply -auto-approve -input=false \
             -var 'pass=hardened' \
             -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
-            -var 'github_oidc_subject=repo:${{ github.repository }}:environment:lab'
+            -var "github_oidc_subject=${{ steps.subject.outputs.value }}"
           terraform -chdir=infra output -json > tf-output.json
 
       - name: Drill the hardened configuration
@@ -165,7 +182,7 @@ jobs:
           terraform -chdir=infra destroy -auto-approve -input=false \
             -var 'pass=permissive' \
             -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
-            -var 'github_oidc_subject=repo:${{ github.repository }}:environment:lab'
+            -var "github_oidc_subject=${{ steps.subject.outputs.value }}"
 
       # Verified against the service, not inferred from the destroy step's exit
       # code. Every lab in this series checks its own teardown, because a

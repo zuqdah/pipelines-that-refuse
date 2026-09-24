@@ -14,11 +14,18 @@
 # mode this whole lab is about.
 check "pipeline_targets_the_checked_environment" {
   assert {
-    condition = can(regex(
-      "environment:\\s*${var.environment_name}\\s*$",
-      join("\n", [for line in split("\n", file("${path.module}/../pipelines/gated-deploy.yml")) : trimspace(line)])
-    ))
-    error_message = "pipelines/gated-deploy.yml does not target environment '${var.environment_name}'. The approval check would not be in the deployment's path and the drill would measure nothing."
+    # contains() over trimmed lines, not a regex. The first version used
+    # regex("environment:\\s*NAME\\s*$"), and Terraform's regex anchors $ to the
+    # end of the STRING rather than the end of a line -- so it only matched when
+    # the environment happened to be named on the file's last line. It never
+    # was, so this check failed on every apply as a warning and would never have
+    # caught the mismatch it exists to catch. A check that always fails is as
+    # useless as one that always passes, and quieter about it.
+    condition = contains(
+      [for line in split("\n", file("${path.module}/../pipelines/gated-deploy.yml")) : trimspace(line)],
+      "environment: ${var.environment_name}"
+    )
+    error_message = "pipelines/gated-deploy.yml does not target environment '${var.environment_name}'. The approval check would not be in the deployment's path, the deployment would run, and the drill would report a gate that was never there as having failed."
   }
 }
 

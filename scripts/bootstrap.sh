@@ -89,7 +89,25 @@ if [ -z "$REPO" ]; then
 fi
 note "Repository ${REPO}"
 
-SUBJECT="repo:${REPO}:environment:${ENVIRONMENT}"
+# The IMMUTABLE subject form, built from GitHub's numeric ids.
+#
+# The portable form repo:OWNER/REPO:environment:ENV is what the documentation
+# shows and it does not work: GitHub presents
+# repo:OWNER@OWNERID/REPO@REPOID:environment:ENV, Entra matches the subject as
+# an exact string, and the first live run of this lab died on AADSTS700213
+# saying precisely that. The ids also survive the repository or the account
+# being renamed, which the portable form does not.
+OWNER_ID=$(gh api "repos/${REPO}" -q .owner.id 2>/dev/null || true)
+REPO_ID=$(gh api "repos/${REPO}" -q .id 2>/dev/null || true)
+REPO_NAME="${REPO#*/}"
+REPO_OWNER="${REPO%%/*}"
+
+if [ -z "$OWNER_ID" ] || [ -z "$REPO_ID" ]; then
+  echo "Could not read the numeric ids for ${REPO}. The repository must exist before the federated credential can be registered, because the subject is built from its id." >&2
+  exit 1
+fi
+
+SUBJECT="repo:${REPO_OWNER}@${OWNER_ID}/${REPO_NAME}@${REPO_ID}:environment:${ENVIRONMENT}"
 note "OIDC subject ${SUBJECT}"
 
 # The organization has to be Entra-backed or a service principal cannot be
