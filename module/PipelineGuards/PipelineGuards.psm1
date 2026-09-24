@@ -389,9 +389,15 @@ function Resolve-PullRequestOutcome {
         }
     }
 
+    # The body is included rather than summarised away. An earlier run reported
+    # "HTTP 409 with no recognised policy error" four times running, which is
+    # correct and useless: refusing to guess is right, but a verdict that
+    # cannot be investigated wastes the run that produced it.
+    $excerpt = if ([string]::IsNullOrWhiteSpace($Body)) { '(empty body)' } else { $Body.Substring(0, [Math]::Min(400, $Body.Length)) }
+
     return [pscustomobject]@{
         Outcome = 'Unknown'
-        Reason  = "HTTP $StatusCode with no recognised policy error. Unexplained, therefore a failure."
+        Reason  = "HTTP $StatusCode with blocking policies '$BlockingPolicies' and no recognised policy error. Unexplained, therefore a failure. The service said: $excerpt"
         Signal  = "HTTP $StatusCode"
     }
 }

@@ -644,12 +644,30 @@ function Test-DrillCompletion {
         return Resolve-PullRequestOutcome -StatusCode $current.StatusCode -Body $current.Raw
     }
 
-    $attempt = Invoke-Ado -Identity 'author' -Method Patch `
-        -Uri "$organization/$projectName/_apis/git/repositories/$repositoryId/pullrequests/$PullRequestId`?api-version=$script:ApiVersion" `
-        -Body @{
-        status                = 'completed'
-        lastMergeSourceCommit = @{ commitId = $current.Body.lastMergeSourceCommit.commitId }
-        completionOptions     = @{ deleteSourceBranch = $false; mergeStrategy = 'noFastForward' }
+    # Retried once on 409.
+    #
+    # Completion carries a concurrency check on lastMergeSourceCommit, and
+    # Azure DevOps recomputes the merge whenever the source branch moves -- so
+    # a 409 can simply mean the commit id read a moment ago is already stale.
+    # The retry re-reads the pull request first, which is the point: retrying
+    # with the same stale id would fail identically and prove nothing.
+    $attempt = $null
+    foreach ($try in 1..2) {
+        $attempt = Invoke-Ado -Identity 'author' -Method Patch `
+            -Uri "$organization/$projectName/_apis/git/repositories/$repositoryId/pullrequests/$PullRequestId`?api-version=$script:ApiVersion" `
+            -Body @{
+            status                = 'completed'
+            lastMergeSourceCommit = @{ commitId = $current.Body.lastMergeSourceCommit.commitId }
+            completionOptions     = @{ deleteSourceBranch = $false; mergeStrategy = 'noFastForward' }
+        }
+
+        if ($attempt.StatusCode -ne 409 -or $try -eq 2) { break }
+
+        Write-Information "  (completion returned 409; re-reading the pull request and retrying once)"
+        Start-Sleep -Seconds 8
+        $refresh = Invoke-Ado -Identity 'author' `
+            -Uri "$organization/$projectName/_apis/git/repositories/$repositoryId/pullrequests/$PullRequestId`?api-version=$script:ApiVersion"
+        if ($refresh.StatusCode -eq 200) { $current = $refresh }
     }
 
     # Azure DevOps queues the merge, so the status immediately after the PATCH
