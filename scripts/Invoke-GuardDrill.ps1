@@ -464,6 +464,35 @@ $forcePush = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Argum
 $verdict = Resolve-PushOutcome -ExitCode $forcePush.ExitCode -Stderr $forcePush.Stderr -Stdout $forcePush.Stdout
 Set-Observation -Id 'force-push-to-protected-branch' -Outcome $verdict.Outcome -Reason $verdict.Reason
 
+# force-push-to-unprotected-branch.
+#
+# The only place the ForcePush access control entry is observable. On the
+# protected branch the policy answers first, so that guard proves the policy
+# works and says nothing about the permission -- which was what it was written
+# to test.
+$unprotected = "drill/unprotected-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+$null = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('checkout', '-b', $unprotected)
+Set-DrillFileContent -Directory $authorClone -Text "unprotected-$(Get-Random)"
+Invoke-DrillCommit -Identity 'author' -Directory $authorClone -Message 'Seed a branch with no policy on it'
+$seedPush = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('push', '-u', 'origin', $unprotected)
+
+if ($seedPush.ExitCode -ne 0) {
+    # A topic branch carries no policy, so this must succeed. If it does not,
+    # the force push below has nothing to rewrite and a refusal would be
+    # crediting the permission for a push that never happened.
+    Set-Observation -Id 'force-push-to-unprotected-branch' -Outcome 'Unknown' `
+        -Reason "Could not create the unprotected branch, so there was nothing to force push over: $($seedPush.Stderr)"
+} else {
+    # Rewrite the branch's history, which is what ForcePush governs.
+    Set-DrillFileContent -Directory $authorClone -Text "unprotected-amended-$(Get-Random)"
+    $null = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('commit', '--amend', '--no-edit', '-a')
+    $forceUnprotected = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('push', '--force', 'origin', $unprotected)
+    $verdict = Resolve-PushOutcome -ExitCode $forceUnprotected.ExitCode -Stderr $forceUnprotected.Stderr -Stdout $forceUnprotected.Stdout
+    Set-Observation -Id 'force-push-to-unprotected-branch' -Outcome $verdict.Outcome -Reason $verdict.Reason
+}
+
+$null = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('checkout', $branchShort)
+
 # delete-protected-branch
 $deleteBranch = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('push', 'origin', '--delete', $branchShort)
 $verdict = Resolve-PushOutcome -ExitCode $deleteBranch.ExitCode -Stderr $deleteBranch.Stderr -Stdout $deleteBranch.Stdout
@@ -590,7 +619,56 @@ function Test-DrillCompletion {
         }
     }
 
-    return Resolve-PullRequestOutcome -StatusCode $attempt.StatusCode -Body $attempt.Raw -ResultingStatus $status
+    return Resolve-PullRequestOutcome -StatusCode $attempt.StatusCode -Body $attempt.Raw `
+        -ResultingStatus $status -BlockingPolicies (Get-DrillPolicyState -PullRequestId $PullRequestId)
+}
+
+function Get-DrillPolicyState {
+    <#
+        .SYNOPSIS
+        Asks Azure DevOps whether a blocking policy on this pull request is unmet.
+
+        .DESCRIPTION
+        The authoritative answer, and the reason this function exists at all.
+        A completion refused because a blocking policy is unsatisfied and the
+        caller holds no bypass returns HTTP 403 -- identical by status code to a
+        caller with no access whatsoever. Run 7 reported two guards as
+        AuthFailure on exactly that basis, of policies that were working.
+
+        Returns Unknown rather than guessing when the evaluations cannot be
+        read, because 'no blocking policy unmet' and 'could not tell' must not
+        collapse into the same answer.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][int] $PullRequestId)
+
+    $projectId = Get-TfValue 'project_id'
+    $artifact = "vstfs:///CodeReview/CodeReviewId/$projectId/$PullRequestId"
+    $uri = "$organization/$projectName/_apis/policy/evaluations?artifactId=$([uri]::EscapeDataString($artifact))&api-version=$script:ApiVersion"
+
+    $result = Invoke-Ado -Identity 'author' -Uri $uri
+    if ($result.StatusCode -ne 200 -or $null -eq $result.Body.value) {
+        Write-Information "  (policy evaluations unreadable: HTTP $($result.StatusCode))"
+        return 'Unknown'
+    }
+
+    $blocking = @($result.Body.value | Where-Object { $_.configuration.isBlocking -eq $true })
+    if (-not $blocking.Count) {
+        Write-Information '  (no blocking policy applies to this pull request)'
+        return 'Met'
+    }
+
+    # 'approved' is the only status that satisfies a blocking policy. queued,
+    # running, rejected and notApplicable all leave it unsatisfied, and lumping
+    # them in with approved would report a bypass whenever an evaluation was
+    # merely slow.
+    $unmet = @($blocking | Where-Object { [string]$_.status -ne 'approved' })
+    if ($unmet.Count) {
+        Write-Information "  (blocking policies unmet: $(($unmet | ForEach-Object { "$($_.configuration.type.displayName)=$($_.status)" }) -join ', '))"
+        return 'Unmet'
+    }
+    return 'Met'
 }
 
 # complete-pr-without-approval

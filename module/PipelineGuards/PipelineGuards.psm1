@@ -303,14 +303,60 @@ function Resolve-PullRequestOutcome {
         # queues it and reports the outcome on the pull request itself.
         [Parameter()]
         [AllowEmptyString()]
-        [string] $ResultingStatus = ''
+        [string] $ResultingStatus = '',
+
+        # What the policy evaluations API says about this pull request, which is
+        # the only authoritative answer available.
+        #
+        # Status codes are not enough. A completion refused because a blocking
+        # policy is unmet and the caller holds no bypass comes back 403, which
+        # is indistinguishable by code alone from a caller with no access at
+        # all. The first version read 403 as AuthFailure -- safe, because it
+        # proves nothing, but it under-reported a policy that was working
+        # exactly as intended. Asking the service which policies are unmet
+        # removes the guess rather than replacing it with a better one.
+        [Parameter()]
+        [ValidateSet('Unmet', 'Met', 'Unknown')]
+        [string] $BlockingPolicies = 'Unknown'
     )
 
-    if ($StatusCode -in 401, 403) {
+    # Checked first: a completed pull request is a bypass whatever else is true.
+    if ($ResultingStatus -eq 'completed') {
+        return [pscustomobject]@{
+            Outcome = 'Allowed'
+            Reason  = 'The pull request completed.'
+            Signal  = 'status=completed'
+        }
+    }
+
+    # Authoritative, so it outranks the status code. The pull request did not
+    # complete and the service reports a blocking policy unsatisfied: that is
+    # the policy holding, whatever HTTP code the completion call returned.
+    if ($BlockingPolicies -eq 'Unmet') {
+        return [pscustomobject]@{
+            Outcome = 'RefusedByPolicy'
+            Reason  = "The pull request did not complete and the policy evaluations report a blocking policy unmet (completion returned HTTP $StatusCode)."
+            Signal  = 'evaluations: blocking policy unmet'
+        }
+    }
+
+    if ($StatusCode -eq 401) {
         return [pscustomobject]@{
             Outcome = 'AuthFailure'
-            Reason  = "HTTP $StatusCode. The request was rejected before policy evaluation."
-            Signal  = "HTTP $StatusCode"
+            Reason  = 'HTTP 401. The request was rejected before policy evaluation.'
+            Signal  = 'HTTP 401'
+        }
+    }
+
+    if ($StatusCode -eq 403) {
+        # Reached only when the evaluations could not be read or reported every
+        # blocking policy satisfied. Then a 403 really is an access problem, and
+        # calling it one is the safe direction: it proves nothing about the
+        # control either way.
+        return [pscustomobject]@{
+            Outcome = 'AuthFailure'
+            Reason  = "HTTP 403 with blocking policies reported '$BlockingPolicies'. Without an unmet policy to attribute it to, this is an access failure and proves nothing about the control."
+            Signal  = 'HTTP 403'
         }
     }
 
@@ -326,15 +372,8 @@ function Resolve-PullRequestOutcome {
         # This is the trap. Completion is asynchronous: a 200 means the request
         # was accepted, and the pull request can still sit at 'active' because a
         # policy refused the merge. Believing the status code alone would report
-        # a bypass that never happened.
-        if ($ResultingStatus -eq 'completed') {
-            return [pscustomobject]@{
-                Outcome = 'Allowed'
-                Reason  = 'The pull request completed with no approval.'
-                Signal  = 'status=completed'
-            }
-        }
-
+        # a bypass that never happened. The 'completed' case is handled at the
+        # top of the function, before anything else.
         if ($ResultingStatus -in 'active', 'notSet', 'queued') {
             return [pscustomobject]@{
                 Outcome = 'RefusedByPolicy'

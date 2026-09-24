@@ -51,20 +51,30 @@
       "title": "A force push to main is refused",
       "surface": "git",
       "identity": "author",
+      "expectDefault": "RefusedByPolicy",
+      "expectHardened": "RefusedByPolicy",
+      "severity": "Critical",
+      "why": "Refused by POLICY, not by permission, and that correction is the finding. This guard originally expected RefusedByPermission on the reasoning that force push is governed by the ForcePush access control entry. Run 7 returned TF402455 -- \"Pushes to this branch are not permitted; you must use a pull request\" -- so a blocking branch policy answers before the ForcePush entry is ever consulted. The consequence matters: on a policy-protected branch you cannot learn anything about your force-push permissions, and a team that tested ForcePush against a protected branch would conclude its deny works having never exercised it. See force-push-to-unprotected-branch, which is where that permission is observable."
+    },
+    {
+      "id": "force-push-to-unprotected-branch",
+      "title": "A force push to a topic branch is refused by permission",
+      "surface": "git",
+      "identity": "author",
       "expectDefault": "RefusedByPermission",
       "expectHardened": "RefusedByPermission",
-      "severity": "Critical",
-      "why": "A force push rewrites the history that reviews and pipeline runs are pinned to. Expected to be refused by PERMISSION, not by policy: force push is governed by the ForcePush access control entry, and hardening branch policies says nothing about it. Conflating the two is how a team concludes its policy work covered this."
+      "severity": "High",
+      "why": "Exists because the protected-branch guard cannot test what it was written to test. A blocking policy refuses a force push before the ForcePush access control entry is reached, so the only place that entry is observable is a branch carrying no policy. Expected to be refused in both passes: ForcePush is denied to the identities under test at the repository level, and hardening a branch policy does not touch it."
     },
     {
       "id": "delete-protected-branch",
       "title": "Deleting main is refused",
       "surface": "git",
       "identity": "author",
-      "expectDefault": "RefusedByPermission",
-      "expectHardened": "RefusedByPermission",
+      "expectDefault": "RefusedByPolicy",
+      "expectHardened": "RefusedByPolicy",
       "severity": "High",
-      "why": "Deleting the branch removes the policies attached to it. A control that can be deleted by the identity it constrains is not a control."
+      "why": "Refused by policy for the same reason as the force push: the blocking policy on the branch answers before the ForcePush entry that also governs deletion. Deleting the branch would remove the policies attached to it, so a control that can be deleted by the identity it constrains is not a control -- but what refuses it here is the policy, not the permission."
     },
     {
       "id": "complete-pr-without-approval",
