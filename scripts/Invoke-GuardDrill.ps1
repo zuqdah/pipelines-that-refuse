@@ -289,34 +289,47 @@ function Invoke-Git {
         [Environment]::SetEnvironmentVariable($key, $vars[$key])
     }
 
-    $stdoutFile = New-TemporaryFile
-    $stderrFile = New-TemporaryFile
+    # ProcessStartInfo.ArgumentList, not Start-Process -ArgumentList.
+    #
+    # Start-Process joins an argument array into a single command line without
+    # quoting, so any argument containing a space is split into several. Passing
+    # @('commit', '-am', 'Attempt a direct push') made git see
+    #   commit -am Attempt a direct push
+    # take "Attempt" as the whole message, and treat the remaining words as
+    # PATHS -- "fatal: paths 'a ...' with -a does not make sense".
+    #
+    # Every commit therefore failed, every push had nothing to send, and every
+    # push exited zero with "Everything up-to-date", which the classifier read
+    # as a protected branch letting a push through. One unquoted space produced
+    # four confidently wrong guard results.
+    #
+    # ArgumentList on ProcessStartInfo escapes each element properly.
     try {
-        $startParams = @{
-            FilePath               = 'git'
-            ArgumentList           = $Arguments
-            NoNewWindow            = $true
-            Wait                   = $true
-            PassThru               = $true
-            RedirectStandardOutput = $stdoutFile
-            RedirectStandardError  = $stderrFile
-        }
-        if ($WorkingDirectory) { $startParams['WorkingDirectory'] = $WorkingDirectory }
+        $psi = [System.Diagnostics.ProcessStartInfo]::new('git')
+        foreach ($argument in $Arguments) { $psi.ArgumentList.Add($argument) }
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
 
-        $process = Start-Process @startParams
-        $stdout = [System.IO.File]::ReadAllText($stdoutFile)
-        $stderr = [System.IO.File]::ReadAllText($stderrFile)
+        $process = [System.Diagnostics.Process]::Start($psi)
+
+        # Read both streams asynchronously before waiting. Reading one to the
+        # end first deadlocks if the other fills its buffer, which git will do
+        # on a verbose push.
+        $outTask = $process.StandardOutput.ReadToEndAsync()
+        $errTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
 
         return [pscustomobject]@{
             ExitCode = $process.ExitCode
-            Stdout   = $stdout
-            Stderr   = $stderr
+            Stdout   = $outTask.GetAwaiter().GetResult()
+            Stderr   = $errTask.GetAwaiter().GetResult()
         }
     } finally {
         foreach ($key in $previous.Keys) {
             [Environment]::SetEnvironmentVariable($key, $previous[$key])
         }
-        Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -326,6 +339,15 @@ function New-DrillClone {
     param([Parameter(Mandatory)][string] $Identity)
 
     $dir = Join-Path ([IO.Path]::GetTempPath()) "drill-$Identity-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+
+    # The attribute was added to satisfy the state-changing-verb rule and then
+    # never honoured, which the analyzer caught as PSShouldProcess. Declaring
+    # support for -WhatIf without implementing it is worse than not declaring
+    # it: the switch would be accepted and ignored.
+    if (-not $PSCmdlet.ShouldProcess($repositoryUrl, "clone as $Identity")) {
+        return ''
+    }
+
     $clone = Invoke-Git -Identity $Identity -Arguments @('clone', $repositoryUrl, $dir)
     if ($clone.ExitCode -ne 0) {
         throw "Could not clone as '$Identity': $($clone.Stderr). Every guard for this identity would otherwise report AuthFailure."
