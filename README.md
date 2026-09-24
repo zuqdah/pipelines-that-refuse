@@ -30,11 +30,12 @@ that failed to authenticate:
 
 | | |
 |---|---|
-| Guards attempted | 11, across git, the REST API and pipeline runs |
-| Expected to hold in both passes | 7 |
+| Guards attempted | 12, across git, the REST API and pipeline runs |
+| Hold identically in both passes | 10 |
 | Expected to change once hardened | 2 — the remediation boundary |
 | Findings configuration cannot close | 2, reported as findings rather than failures |
 | Identities | 4, because the interesting guards cannot be driven by one |
+| Result | **12/12 as declared, both passes** |
 
 The expectations live in [`guard-matrix.json`](guard-matrix.json), written
 before the drill runs. Without it, a drill that reported "refused" for
@@ -60,7 +61,7 @@ cannot be classified is a failure rather than a pass:
 
 All of that judgement lives in
 [`PipelineGuards`](module/PipelineGuards/PipelineGuards.psm1), which makes no
-network call and is covered by 45 unit tests, so it can be audited without an
+network call and is covered by 48 unit tests, so it can be audited without an
 Azure DevOps organization anywhere in reach.
 
 ## The guards worth reading
@@ -80,11 +81,30 @@ because the approval count was satisfied elsewhere. Testing this needs a fourth
 identity — one to approve and one to object — and borrowing the exempt identity
 for it would have blurred what that one proves.
 
-**Force push is not governed by branch policy.** It is an access control entry,
-`ForcePush`, and the same entry also covers deleting the branch. So two guards
-here are expected to be refused *by permission*, and hardening every branch
-policy in the project moves neither of them. A team that hardened its policies
-and believed it had covered history rewriting has not.
+**A blocking policy answers before the `ForcePush` entry.** Force push and
+branch deletion are governed by an access control entry, not by branch policy —
+but on a *protected* branch the policy refuses first, with `TF402455`, and the
+entry is never consulted. So a team that denies force-push and then tests it
+against a protected branch will see a refusal and conclude their deny works,
+having never exercised it. That is why there is a separate guard for a topic
+branch: it is the only place the permission is observable.
+
+**The creator of a branch can force-push to it, whatever the repository says.**
+This one came out of a failing guard rather than a design decision, and it is
+measured, not inferred:
+
+| branch created by | force push by the author |
+|---|---|
+| the author | **Allowed** |
+| another identity | **RefusedByPermission** |
+
+Same `ForcePush` deny, same identity, same repository. The only variable is who
+created the branch. Azure DevOps grants a branch's creator rights that override
+a repository-wide deny, so **denying force-push across a repository does not
+stop anybody rewriting a branch they made themselves** — which is most of the
+branches they will ever push to. The first version of this guard had the author
+create the branch and was therefore measuring the creator grant while believing
+it was measuring the permission.
 
 **The API is the honest surface.** Completion is tested against REST, not the
 web UI, because the UI disables the complete button when policies are unmet —
@@ -111,6 +131,8 @@ replacement over log output. Encode the value, reverse it, or print it one
 character at a time and it goes straight through, perfectly readable. This is
 not a misconfiguration to fix — it is what masking is, and a pipeline treating
 it as a control against the code it runs has misunderstood what it bought.
+
+Both are confirmed live: the plain value came back Masked and the base64 form Leaked, in both passes.
 
 The masking guards run as **two separate pipelines** on purpose. One run
 printing both the plain value and a transformed one leaks, and a scan of that
@@ -311,6 +333,60 @@ every apply — as a *warning*, which `terraform apply` prints and carries on
 past. A check that always fails is as useless as one that always passes and
 quieter about it. Now `contains()` over trimmed lines, with no regex.
 
+**The module written to stop a non-event being read as a result contained
+exactly that bug, in mirror image.** Run 4 reported four guards as `Allowed` —
+a direct push to a protected branch, a force push, a pull request completed
+with no approval, a self-approval accepted. Querying the branch showed `main`
+held only the seed commits and `README.md` was untouched. **Nothing had been
+pushed at all.** `git push` with nothing to send prints "Everything up-to-date"
+and exits **zero**, and the classifier read exit zero as success.
+
+So the function that refuses to call a failed login a policy refusal went on to
+call a push that never happened a policy letting one through. It now checks for
+that string *before* the exit code and returns `Unknown`, because whether the
+branch would have refused a real push is untested. Caught by asking Azure
+DevOps what was on the branch — not by re-reading the classifier, which looked
+correct.
+
+**One unquoted space broke every commit.** `Start-Process -ArgumentList` joins
+an array into a single command line **without quoting**, so
+`@('commit', '-am', 'Attempt a direct push')` reached git as separate words:
+`-m` took `Attempt` as the message and the rest became *paths*. Every commit
+failed, which is why every push was a no-op. `Invoke-Git` now uses
+`ProcessStartInfo.ArgumentList`, which escapes each element, and reads both
+streams asynchronously — reading one to completion first deadlocks when the
+other fills its buffer, which a verbose push will do. Reproduced locally
+against a real repository before changing anything:
+
+```
+Old  exit=128 commits=1 stderr=fatal: paths 'a ...' with -a does not make sense
+New  exit=0   commits=2 stderr=
+```
+
+**A 403 that was the policy working.** A completion refused because a blocking
+policy is unmet, by a caller without bypass, returns **403** — identical by
+status code to a caller with no access whatsoever. Two guards were reported as
+`AuthFailure` on that basis, of policies doing their job. The drill now reads
+the policy evaluations API and treats that as authoritative. Unreadable
+evaluations return `Unknown`, not `Met`: "no blocking policy unmet" and "could
+not tell" must not collapse into one answer. And only `approved` counts as
+satisfied, because treating `queued` as approved would report a bypass whenever
+an evaluation was merely slow.
+
+**Terraform died reconciling drift the lab creates on purpose.** The exempt
+identity's push to `main` is a guard *passing*, and it rewrites `README.md`. By
+the second apply the seeded files have drifted, Terraform wants to write them
+back, that write is a push to `main`, and the hardened policy refuses it with
+`TF402455`. The seeds now `ignore_changes` on content. Granting the orchestrator
+`PolicyExempt` would also have worked — and would have put a policy bypass in
+the lab's own control plane to paper over a problem the lab invented.
+
+**A committed `.sh` needs the executable bit set in the index.** `chmod +x` in
+the working tree is not enough; the file commits as `100644` and the runner
+refuses it with exit 126, after which both the apply and the destroy retried
+twice against a script they could never run. Also already in my notes from an
+earlier lab.
+
 **A here-string cannot live in a YAML block scalar.** A PowerShell here-string
 must close with `'@` at column 0, and column 0 ends a YAML block. `actionlint`
 reports it as "could not parse as YAML", which does not point at the cause.
@@ -319,17 +395,50 @@ reports it as "could not parse as YAML", which does not point at the cause.
 
 | | |
 |---|---|
-| Unit tests | 45, green, no Azure DevOps organization required |
+| Unit tests | 48, green, no Azure DevOps organization required |
 | PSScriptAnalyzer, `terraform validate`, `tflint`, `actionlint`, `shellcheck` | clean |
 | Agent image | builds; carries `base64`, `fold`, `rev`, `tr`; runs non-root |
-| Live run against a real organization | **not yet run** |
+| Live run against a real organization | **12/12 in both passes** |
+| Teardown | **verified** against the organization and Entra afterwards |
 
-The live run is the part that matters and it has not happened yet. Every
-statement above about what Azure DevOps *does* is sourced from the provider
-schema or the permissions documentation and is cited as such; every statement
-about what this lab *observed* will be added after the drill runs, with the
-numbers it produced. The other labs in this series took five and nine live runs
-to get right, and there is no reason to expect this one to be different.
+From the passing run, against a live Azure DevOps organization:
+
+```
+                                             permissive        hardened
+push-to-protected-branch                RefusedByPolicy   RefusedByPolicy
+force-push-to-protected-branch          RefusedByPolicy   RefusedByPolicy
+force-push-to-unprotected-branch    RefusedByPermission   RefusedByPermission
+delete-protected-branch                 RefusedByPolicy   RefusedByPolicy
+policy-exempt-push                              Allowed   Allowed
+complete-pr-without-approval            RefusedByPolicy   RefusedByPolicy
+self-approve-own-pr                     RefusedByPolicy   RefusedByPolicy
+stale-approval-survives-new-commit              Allowed   RefusedByPolicy
+complete-over-outstanding-rejection             Allowed   RefusedByPolicy
+deploy-without-environment-approval             Blocked   Blocked
+secret-masked-in-log                             Masked   Masked
+secret-masking-defeated-by-transform             Leaked   Leaked
+
+12/12 as declared; 0 failed; 0 inconclusive.
+```
+
+**Two guards change and ten do not.** That is the whole result. Turning on
+`on_push_reset_approved_votes` and `allow_completion_with_rejects_or_waits` is
+the difference between a review that means something and a review that does
+not — and nothing else on the list moves, so the reader could not have inferred
+it from a settings page where all twelve controls looked equally green.
+
+The permissive pass reached 12/12 three separate times, so it is reproducible
+rather than lucky.
+
+A run costs **nothing** and takes about twelve minutes for both passes, most of
+it waiting: 90 seconds for a service principal to reach Azure DevOps from
+Entra, three minutes for a federated credential to propagate, and the rest in
+six pipeline runs on a self-hosted agent.
+
+**Twelve live runs to get here** — ten failures. The other labs in this series
+took five and nine. Every one of those failures is in the section above, and
+three of them were things an earlier lab had already written down and I read
+before starting anyway.
 
 ## What this does not do
 
