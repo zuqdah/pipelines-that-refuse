@@ -257,29 +257,45 @@ fi
 
 say "Configuring the repository"
 
-# A repository created moments earlier returns 403 on its first Actions
-# variable or secret write while GitHub settles permissions, and the message
-# blames repository write access rather than timing -- which sends the reader
-# to check a token scope that was already correct. Retried rather than
-# explained, because the explanation would have been wrong.
+# A newly created repository refuses its first Actions writes with HTTP 403,
+# and the message blames repository write access rather than timing -- which
+# sends the reader to check a token scope that was already correct.
+#
+# Measured on a real run: the variable write succeeded at 20:04, secret writes
+# failed for the next several minutes, and the identical secret write succeeded
+# at 20:17. So the two surfaces settle independently -- secrets need the
+# repository's actions/secrets/public-key endpoint to encrypt against, which
+# variables do not touch. That is the likely mechanism rather than a confirmed
+# one, so the backoff is generous instead of tuned to a theory.
+#
+# A failure here is reported and collected, NOT fatal. The Entra and Azure
+# DevOps work above is the hard part and it is already done; aborting over a
+# repository setting that can be typed in ten seconds means re-running
+# everything to get back to this line.
+GH_FAILED=()
+
 gh_write() {
   local what="$1"
   shift
-  local attempt
-  for attempt in 1 2 3 4 5; do
+  local delay
+  for delay in 5 10 20 30 60 0; do
     if "$@" >/dev/null 2>&1; then
+      note "Set ${what}"
       return 0
     fi
-    if [ "$attempt" -lt 5 ]; then
-      note "Setting ${what} failed (attempt ${attempt}), retrying in 5s"
-      sleep 5
+    if [ "$delay" -gt 0 ]; then
+      note "Setting ${what} was refused, retrying in ${delay}s"
+      sleep "$delay"
     fi
   done
-  echo "Could not set ${what} after five attempts. The error follows:" >&2
-  # Run once more without suppressing output, so the real reason is visible
-  # instead of a summary of five silent failures.
-  "$@" || true
-  return 1
+
+  echo >&2
+  echo "   Could not set ${what} after two minutes of retries. The error:" >&2
+  # Run once more unsuppressed, so the real reason is visible rather than a
+  # summary of six silent failures.
+  "$@" >&2 2>&1 || true
+  GH_FAILED+=("$what")
+  return 0
 }
 
 gh_write "variable ADO_ORGANIZATION" gh variable set ADO_ORGANIZATION --repo "$REPO" --body "$ORG"
@@ -298,8 +314,7 @@ note "Set variable ADO_ORGANIZATION; set secrets AZURE_CLIENT_ID, AZURE_TENANT_I
 if gh api "repos/${REPO}/environments/${ENVIRONMENT}" >/dev/null 2>&1; then
   note "Environment '${ENVIRONMENT}' already exists"
 else
-  gh api --method PUT "repos/${REPO}/environments/${ENVIRONMENT}" >/dev/null
-  note "Created environment '${ENVIRONMENT}'"
+  gh_write "environment ${ENVIRONMENT}" gh api --method PUT "repos/${REPO}/environments/${ENVIRONMENT}"
 fi
 
 # --------------------------------------------------------------- what is left
@@ -307,6 +322,32 @@ fi
 AZP_SET=$(gh secret list --repo "$REPO" --json name -q '.[] | select(.name=="AZP_TOKEN") | .name' 2>/dev/null || true)
 
 say "Done"
+
+# Anything the repository refused is named here with the command to finish it,
+# rather than leaving the reader to work out which of several steps did not
+# happen from a stack of retry messages.
+if [ ${#GH_FAILED[@]} -gt 0 ]; then
+  echo
+  echo "   The Entra and Azure DevOps setup is complete. These repository"
+  echo "   settings were refused and need finishing:"
+  echo
+  for item in "${GH_FAILED[@]}"; do
+    case "$item" in
+      "variable ADO_ORGANIZATION")
+        echo "     gh variable set ADO_ORGANIZATION --repo ${REPO} --body ${ORG}" ;;
+      "secret AZURE_CLIENT_ID")
+        echo "     gh secret set AZURE_CLIENT_ID --repo ${REPO} --body ${APP_ID}" ;;
+      "secret AZURE_TENANT_ID")
+        echo "     gh secret set AZURE_TENANT_ID --repo ${REPO} --body ${TENANT_ID}" ;;
+      "environment ${ENVIRONMENT}")
+        echo "     gh api --method PUT repos/${REPO}/environments/${ENVIRONMENT}" ;;
+      *)
+        echo "     ${item}" ;;
+    esac
+  done
+  echo
+  echo "   Re-running this script is also safe -- it reuses everything it made."
+fi
 
 cat <<EOF
 
