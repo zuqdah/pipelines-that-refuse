@@ -1,0 +1,55 @@
+# Runs inside the guarded repository, because a pipeline defined elsewhere
+# would not be subject to the policies under test.
+#
+# The guard this serves is deploy-without-environment-approval, and what it
+# measures is narrow on purpose: whether the deployment job EXECUTED. An
+# approval request appearing is not the control working, and a run that failed
+# for an unrelated reason also never deployed. So the deployment stage prints a
+# marker as its first action, and the drill reads the job record rather than the
+# run's overall state.
+
+trigger: none
+pr: none
+
+pool:
+  name: $(agentPool)
+
+stages:
+  # Proves the pipeline itself is sound. Without this, a run that stopped
+  # before the deployment stage would be indistinguishable from a run the
+  # approval gated -- and the drill would report a working check over a
+  # pipeline that never compiled.
+  - stage: build
+    displayName: Build (must succeed)
+    jobs:
+      - job: build
+        displayName: Build
+        steps:
+          - checkout: self
+          - script: echo "BUILD_EXECUTED"
+            displayName: Prove the pipeline runs at all
+
+  - stage: deploy
+    displayName: Deploy (must not run without approval)
+    dependsOn: build
+    condition: succeeded()
+    jobs:
+      - deployment: deploy
+        displayName: Deploy to the checked environment
+        # Must match environment_name in the Terraform. A check block in
+        # infra/policies.tf asserts it does, because a typo here would send the
+        # deployment to an unchecked environment, it would run, and the drill
+        # would correctly report that the gate did not hold -- of a gate that
+        # was never in the path.
+        environment: prod-lab
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # First action in the job. If this line is in the log, the
+                # deployment executed and the approval did not gate it,
+                # whatever else the run reports.
+                - script: echo "DEPLOY_EXECUTED"
+                  displayName: Marker the drill looks for
+                - script: echo "Nothing is actually deployed. The point is whether this ran."
+                  displayName: Deploy
