@@ -182,6 +182,26 @@ Describe 'Resolve-PushOutcome' {
     It 'never reports Unknown for a successful push' {
         (Resolve-PushOutcome -ExitCode 0 -Stderr 'some noise on stderr').Outcome | Should -Be 'Allowed'
     }
+
+    # The bug the first live run exposed, in the module written to prevent
+    # exactly this shape of error.
+    It 'does NOT call a no-op push Allowed, even though it exits zero' {
+        $result = Resolve-PushOutcome -ExitCode 0 -Stderr 'Everything up-to-date'
+        $result.Outcome | Should -Be 'Unknown'
+        $result.Outcome | Should -Not -Be 'Allowed'
+        $result.Reason | Should -BeLike '*never happened*'
+    }
+
+    It 'catches "Everything up-to-date" on stdout as well as stderr' {
+        (Resolve-PushOutcome -ExitCode 0 -Stdout 'Everything up-to-date').Outcome | Should -Be 'Unknown'
+    }
+
+    It 'still reports a real push with output on both streams as Allowed' {
+        $result = Resolve-PushOutcome -ExitCode 0 `
+            -Stdout 'To https://dev.azure.com/org/p/_git/r' `
+            -Stderr "remote: Analyzing objects... `n   abc1234..def5678  main -> main"
+        $result.Outcome | Should -Be 'Allowed'
+    }
 }
 
 Describe 'Resolve-PullRequestOutcome' {

@@ -177,10 +177,33 @@ function Resolve-PushOutcome {
 
         [Parameter()]
         [AllowEmptyString()]
-        [string] $Stderr = ''
+        [string] $Stderr = '',
+
+        # git reports "Everything up-to-date" on stderr, but which stream
+        # carries what varies by version, so both are scanned together.
+        [Parameter()]
+        [AllowEmptyString()]
+        [string] $Stdout = ''
     )
 
-    $text = $Stderr
+    $text = ($Stderr + "`n" + $Stdout)
+
+    # Checked before the exit code, and the reason is the whole point of this
+    # module. A push with nothing to send prints "Everything up-to-date" and
+    # exits ZERO. Reading that as Allowed reports a control that failed, when
+    # in fact nothing was ever attempted -- the same mistake as counting a
+    # failed login as a policy refusal, in the opposite direction.
+    #
+    # The first live run of this lab reported four guards as Allowed this way.
+    # main was untouched, the commit had silently failed, and every push was a
+    # no-op that exited 0.
+    if ($text -match 'Everything up-to-date') {
+        return [pscustomobject]@{
+            Outcome = 'Unknown'
+            Reason  = 'git reported "Everything up-to-date", so nothing was pushed. Whether the branch would have refused a real push is untested, and reporting this as Allowed would claim a control failed against an operation that never happened.'
+            Signal  = 'nothing to push'
+        }
+    }
 
     # Checked before anything else: these mean the push never reached a policy.
     $authPatterns = @(

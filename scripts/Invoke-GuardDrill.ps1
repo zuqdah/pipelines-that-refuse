@@ -338,16 +338,74 @@ function New-DrillClone {
 }
 
 function Set-DrillFileContent {
+    <#
+        .SYNOPSIS
+        Changes the drill token in the working tree, and proves it changed.
+
+        .DESCRIPTION
+        Asserting the change is not defensive padding. On the first live run
+        this wrote nothing, every commit was therefore empty, and every push
+        was a no-op that exited zero -- which the classifier read as the push
+        succeeding. Four guards reported that a protected branch had let a push
+        through while main sat untouched.
+
+        So an edit that does not alter the file is a failure here, at the point
+        where the cause is visible, rather than a confident wrong answer six
+        steps later.
+    #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string] $Directory,
         [Parameter(Mandatory)][string] $Text
     )
     $path = Join-Path $Directory 'README.md'
-    if ($PSCmdlet.ShouldProcess($path, 'write drill token')) {
-        $existing = [System.IO.File]::ReadAllText($path)
-        $updated = $existing -replace 'drill-token: .*', "drill-token: $Text"
-        [System.IO.File]::WriteAllText($path, $updated, (New-Object System.Text.UTF8Encoding($false)))
+    if (-not $PSCmdlet.ShouldProcess($path, 'write drill token')) { return }
+
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "No README.md in '$Directory'. The clone did not produce the seeded file, so there is nothing for a pull request to modify."
+    }
+
+    $existing = [System.IO.File]::ReadAllText($path)
+    if ($existing -notmatch 'drill-token:') {
+        throw "README.md in '$Directory' has no 'drill-token:' line to change. Terraform seeds one; without it every commit is empty and every push a no-op that exits zero."
+    }
+
+    $updated = $existing -replace 'drill-token: .*', "drill-token: $Text"
+    [System.IO.File]::WriteAllText($path, $updated, (New-Object System.Text.UTF8Encoding($false)))
+
+    $after = [System.IO.File]::ReadAllText($path)
+    if ($after -eq $existing) {
+        throw "Writing the drill token to '$path' changed nothing. The commit would be empty and the push a no-op reported as success."
+    }
+}
+
+function Invoke-DrillCommit {
+    <#
+        .SYNOPSIS
+        Commits the working tree and refuses to continue if nothing was committed.
+
+        .DESCRIPTION
+        "git commit -am" exits non-zero when there is nothing to commit, and the
+        first live run discarded that result with $null =. The push that followed
+        had nothing to send, printed "Everything up-to-date", exited zero, and
+        was graded as the branch policy having failed.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string] $Identity,
+        [Parameter(Mandatory)][string] $Directory,
+        [Parameter(Mandatory)][string] $Message
+    )
+    if (-not $PSCmdlet.ShouldProcess($Directory, "commit as $Identity")) { return }
+
+    $before = (Invoke-Git -Identity $Identity -WorkingDirectory $Directory -Arguments @('rev-parse', 'HEAD')).Stdout.Trim()
+    $commit = Invoke-Git -Identity $Identity -WorkingDirectory $Directory -Arguments @('commit', '-am', $Message)
+    $after = (Invoke-Git -Identity $Identity -WorkingDirectory $Directory -Arguments @('rev-parse', 'HEAD')).Stdout.Trim()
+
+    if ($commit.ExitCode -ne 0 -or $after -eq $before) {
+        throw ("Commit as '$Identity' produced nothing (exit $($commit.ExitCode)). " +
+            "Every push after this would be a no-op that exits zero and reads as a control letting it through. " +
+            "git said: $($commit.Stdout.Trim()) $($commit.Stderr.Trim())")
     }
 }
 
@@ -374,19 +432,19 @@ $authorClone = New-DrillClone -Identity 'author'
 
 # push-to-protected-branch
 Set-DrillFileContent -Directory $authorClone -Text "direct-push-$(Get-Random)"
-$null = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('commit', '-am', 'Attempt a direct push to a protected branch')
+Invoke-DrillCommit -Identity 'author' -Directory $authorClone -Message 'Attempt a direct push to a protected branch'
 $push = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('push', 'origin', $branchShort)
-$verdict = Resolve-PushOutcome -ExitCode $push.ExitCode -Stderr $push.Stderr
+$verdict = Resolve-PushOutcome -ExitCode $push.ExitCode -Stderr $push.Stderr -Stdout $push.Stdout
 Set-Observation -Id 'push-to-protected-branch' -Outcome $verdict.Outcome -Reason $verdict.Reason
 
 # force-push-to-protected-branch
 $forcePush = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('push', '--force', 'origin', $branchShort)
-$verdict = Resolve-PushOutcome -ExitCode $forcePush.ExitCode -Stderr $forcePush.Stderr
+$verdict = Resolve-PushOutcome -ExitCode $forcePush.ExitCode -Stderr $forcePush.Stderr -Stdout $forcePush.Stdout
 Set-Observation -Id 'force-push-to-protected-branch' -Outcome $verdict.Outcome -Reason $verdict.Reason
 
 # delete-protected-branch
 $deleteBranch = Invoke-Git -Identity 'author' -WorkingDirectory $authorClone -Arguments @('push', 'origin', '--delete', $branchShort)
-$verdict = Resolve-PushOutcome -ExitCode $deleteBranch.ExitCode -Stderr $deleteBranch.Stderr
+$verdict = Resolve-PushOutcome -ExitCode $deleteBranch.ExitCode -Stderr $deleteBranch.Stderr -Stdout $deleteBranch.Stdout
 Set-Observation -Id 'delete-protected-branch' -Outcome $verdict.Outcome -Reason $verdict.Reason
 
 # policy-exempt-push. Runs last of the git guards on purpose: it is expected to
@@ -394,9 +452,9 @@ Set-Observation -Id 'delete-protected-branch' -Outcome $verdict.Outcome -Reason 
 # reading a branch this guard changed.
 $exemptClone = New-DrillClone -Identity 'exempt'
 Set-DrillFileContent -Directory $exemptClone -Text "exempt-push-$(Get-Random)"
-$null = Invoke-Git -Identity 'exempt' -WorkingDirectory $exemptClone -Arguments @('commit', '-am', 'Push to a protected branch while holding PolicyExempt')
+Invoke-DrillCommit -Identity 'exempt' -Directory $exemptClone -Message 'Push to a protected branch while holding PolicyExempt'
 $exemptPush = Invoke-Git -Identity 'exempt' -WorkingDirectory $exemptClone -Arguments @('push', 'origin', $branchShort)
-$verdict = Resolve-PushOutcome -ExitCode $exemptPush.ExitCode -Stderr $exemptPush.Stderr
+$verdict = Resolve-PushOutcome -ExitCode $exemptPush.ExitCode -Stderr $exemptPush.Stderr -Stdout $exemptPush.Stdout
 Set-Observation -Id 'policy-exempt-push' -Outcome $verdict.Outcome -Reason $verdict.Reason
 
 Write-Information "`n== pull request guards"
@@ -420,7 +478,7 @@ function New-DrillPullRequest {
 
     $null = Invoke-Git -Identity 'author' -WorkingDirectory $dir -Arguments @('checkout', '-b', $branch)
     Set-DrillFileContent -Directory $dir -Text "$Label-initial"
-    $null = Invoke-Git -Identity 'author' -WorkingDirectory $dir -Arguments @('commit', '-am', "Change for $Label")
+    Invoke-DrillCommit -Identity 'author' -Directory $dir -Message "Change for $Label"
     $push = Invoke-Git -Identity 'author' -WorkingDirectory $dir -Arguments @('push', '-u', 'origin', $branch)
     if ($push.ExitCode -ne 0) {
         # A topic branch is not protected, so this must work. If it does not,
@@ -530,7 +588,7 @@ $pr = New-DrillPullRequest -Label 'stale-approval'
 $null = Set-DrillVote -Identity 'reviewer' -PullRequestId $pr.Id -Vote 10
 # The approval now exists for this diff. Change the diff underneath it.
 Set-DrillFileContent -Directory $pr.Directory -Text "stale-approval-changed-$(Get-Random)"
-$null = Invoke-Git -Identity 'author' -WorkingDirectory $pr.Directory -Arguments @('commit', '-am', 'Change the code after it was approved')
+Invoke-DrillCommit -Identity 'author' -Directory $pr.Directory -Message 'Change the code after it was approved'
 $pushAfter = Invoke-Git -Identity 'author' -WorkingDirectory $pr.Directory -Arguments @('push', 'origin', $pr.Branch)
 if ($pushAfter.ExitCode -ne 0) {
     Set-Observation -Id 'stale-approval-survives-new-commit' -Outcome 'Unknown' `
