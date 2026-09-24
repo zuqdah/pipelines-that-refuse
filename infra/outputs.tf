@@ -38,9 +38,25 @@ output "environment_id" {
 output "build_definition_ids" {
   description = "Pipeline ids the drill queues by number rather than by name, because two definitions can share a name across folders."
   value = {
-    gated_deploy = azuredevops_build_definition.gated_deploy.id
-    secrets      = azuredevops_build_definition.secrets.id
+    gated_deploy       = azuredevops_build_definition.gated_deploy.id
+    secret_masked      = azuredevops_build_definition.secret["masked"].id
+    secret_transformed = azuredevops_build_definition.secret["transformed"].id
   }
+}
+
+# The value the masking guards hunt for. It has to leave Terraform, because the
+# drill cannot search a log for a string it does not know.
+#
+# Marked sensitive so it is not printed by plan or apply, but it is genuinely
+# recoverable from state and from this output, and calling that a secret would
+# be dishonest. It guards nothing: a random string generated for one run, in a
+# project destroyed the same day, whose entire purpose is to be found in a log.
+# The real secret in this lab is the agent registration token, and that one
+# never enters Terraform at all.
+output "drill_secret" {
+  description = "Throwaway value the masking guards search for. Not a credential; it protects nothing and is destroyed with the project."
+  value       = random_password.drill_secret.result
+  sensitive   = true
 }
 
 # Client ids, not secrets. Each identity is federated, so there is nothing here

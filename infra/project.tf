@@ -36,8 +36,9 @@ resource "azuredevops_git_repository" "drill" {
 # the policies created first, terraform apply fails on its own repository.
 resource "azuredevops_git_repository_file" "pipeline" {
   for_each = {
-    "azure-pipelines-gated-deploy.yml" = "${path.module}/../pipelines/gated-deploy.yml"
-    "azure-pipelines-secrets.yml"      = "${path.module}/../pipelines/secret-handling.yml"
+    "azure-pipelines-gated-deploy.yml"       = "${path.module}/../pipelines/gated-deploy.yml"
+    "azure-pipelines-secret-masked.yml"      = "${path.module}/../pipelines/secret-masked.yml"
+    "azure-pipelines-secret-transformed.yml" = "${path.module}/../pipelines/secret-transformed.yml"
   }
 
   repository_id       = azuredevops_git_repository.drill.id
@@ -90,9 +91,20 @@ resource "azuredevops_build_definition" "gated_deploy" {
   depends_on = [azuredevops_git_repository_file.pipeline]
 }
 
-resource "azuredevops_build_definition" "secrets" {
+# Two definitions for the two masking guards, not one. Guards 10 and 11 hunt
+# for the same value with opposite expectations, so a single run printing both
+# the plain and the transformed value would leak -- and a scan of that log
+# would report the masking guard as failed, of a feature that worked exactly as
+# documented. Separate runs give each guard a log that answers only its own
+# question.
+resource "azuredevops_build_definition" "secret" {
+  for_each = {
+    masked      = "azure-pipelines-secret-masked.yml"
+    transformed = "azure-pipelines-secret-transformed.yml"
+  }
+
   project_id = azuredevops_project.drill.id
-  name       = "secret-handling"
+  name       = "secret-${each.key}"
 
   ci_trigger {
     use_yaml = false
@@ -102,7 +114,7 @@ resource "azuredevops_build_definition" "secrets" {
     repo_type   = "TfsGit"
     repo_id     = azuredevops_git_repository.drill.id
     branch_name = azuredevops_git_repository.drill.default_branch
-    yml_path    = "azure-pipelines-secrets.yml"
+    yml_path    = each.value
   }
 
   variable {
@@ -113,7 +125,8 @@ resource "azuredevops_build_definition" "secrets" {
   # The value the masking guards look for. Long and random on purpose: the
   # drill's punctuation-insensitive scan, which is what catches a secret
   # printed one character at a time, would false-positive against ordinary log
-  # text if this were short.
+  # text if this were short. The module refuses to scan for anything under
+  # twelve characters for that reason.
   variable {
     name         = "drillSecret"
     secret_value = random_password.drill_secret.result

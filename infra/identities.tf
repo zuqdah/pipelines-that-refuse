@@ -18,6 +18,10 @@ locals {
       description = "Approves pull requests, so an approval exists to be made stale."
       exempt      = false
     }
+    dissenter = {
+      description = "Votes to reject. Exists because 'the approval count is satisfied AND a reviewer objected' needs two voters, and borrowing the exempt identity for it would blur what that one proves."
+      exempt      = false
+    }
     exempt = {
       description = "Holds PolicyExempt. Exists to prove the exemption overrides policy, and to put a name on who would hold it."
       exempt      = true

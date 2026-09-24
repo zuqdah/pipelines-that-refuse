@@ -1,0 +1,111 @@
+name: Destroy
+
+# The safety net. A drill that dies between apply and teardown -- a cancelled
+# run, a timeout, a runner that vanished -- leaves a project, four Entra
+# applications and an agent registration behind. None of it costs money, which
+# is exactly why it would sit there unnoticed.
+on:
+  schedule:
+    # 07:00 UTC, matching the other labs in this series.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  # Shares a group with the drill, so a scheduled destroy cannot fire while a
+  # drill is mid-run and delete the project out from under it.
+  group: guard-drill
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+
+jobs:
+  destroy:
+    name: Remove anything a drill left behind
+    runs-on: ubuntu-latest
+    environment: lab
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.16.3"
+          terraform_wrapper: false
+
+      # Local state, so a scheduled run starts with nothing to destroy unless
+      # the drill's state was persisted. That is deliberate: this workflow's
+      # real job is the sweep below, which asks the service what exists rather
+      # than asking a state file what it remembers.
+      - name: Destroy whatever the state holds
+        run: |
+          terraform -chdir=infra init -input=false
+          terraform -chdir=infra destroy -auto-approve -input=false \
+            -var 'pass=permissive' \
+            -var 'organization=${{ vars.ADO_ORGANIZATION }}' \
+            -var 'github_oidc_subject=repo:${{ github.repository }}:environment:lab' \
+          || echo 'Nothing in state to destroy.'
+
+      # The part that matters. Terraform can only remove what its state knows
+      # about, and the run that abandoned these resources is the run whose
+      # state was lost. So the organization is asked directly.
+      - name: Sweep the organization for abandoned drill resources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $InformationPreference = 'Continue'
+
+          $org = 'https://dev.azure.com/${{ vars.ADO_ORGANIZATION }}'
+          $token = (az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv)
+          if ([string]::IsNullOrWhiteSpace($token)) {
+            throw 'No Azure DevOps token. The sweep cannot report "nothing found" without having looked.'
+          }
+          $headers = @{ Authorization = "Bearer $token" }
+
+          $projects = Invoke-RestMethod -Uri "$org/_apis/projects?api-version=7.1" -Headers $headers
+          $leftovers = @($projects.value | Where-Object { $_.name -like 'guard-drill*' })
+
+          if ($leftovers.Count) {
+            foreach ($project in $leftovers) {
+              Write-Information "Deleting abandoned project '$($project.name)' ($($project.id))."
+              $null = Invoke-RestMethod -Method Delete -Headers $headers `
+                -Uri "$org/_apis/projects/$($project.id)?api-version=7.1"
+            }
+          } else {
+            Write-Information 'No abandoned drill project found.'
+          }
+
+          # Agent pools outlive their project, so an abandoned pool would keep
+          # collecting offline agent registrations run after run.
+          $pools = Invoke-RestMethod -Uri "$org/_apis/distributedtask/pools?api-version=7.1" -Headers $headers
+          foreach ($pool in @($pools.value | Where-Object { $_.name -like 'guard-drill*' })) {
+            Write-Information "Deleting abandoned agent pool '$($pool.name)'."
+            $null = Invoke-RestMethod -Method Delete -Headers $headers `
+              -Uri "$org/_apis/distributedtask/pools/$($pool.id)?api-version=7.1"
+          }
+
+      # Entra applications are the resource most likely to be missed: they are
+      # free, invisible from Azure DevOps, and each abandoned drill leaves four.
+      - name: Sweep Entra for abandoned drill applications
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $InformationPreference = 'Continue'
+
+          $apps = az ad app list --filter "startswith(displayName,'guard-drill-')" -o json | ConvertFrom-Json
+          if (-not @($apps).Count) {
+            Write-Information 'No abandoned drill applications found.'
+            return
+          }
+          foreach ($app in $apps) {
+            Write-Information "Deleting abandoned application '$($app.displayName)' ($($app.appId))."
+            az ad app delete --id $app.appId
+          }

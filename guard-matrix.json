@@ -19,7 +19,6 @@
     "blocked by branch policy and a push blocked by a failed login look identical",
     "to an exit code, and only one of them is the control working."
   ],
-
   "outcomes": {
     "Allowed": "The operation completed. For a guard expecting refusal, the control did not hold.",
     "RefusedByPolicy": "Refused by a branch policy or an environment check. This is the control working.",
@@ -30,13 +29,12 @@
     "Leaked": "A secret reached the log in a readable form.",
     "Unknown": "The outcome could not be classified. Always a failure, never a pass."
   },
-
   "identities": {
     "author": "Opens pull requests and pushes. Holds no policy exemption.",
     "reviewer": "Approves pull requests. Exists because a submitter cannot approve their own work, so a single identity cannot produce an approval to then make stale.",
+    "dissenter": "Votes to reject. Exists because \"the approval count is satisfied and a reviewer objected\" needs two voters, and borrowing the exempt identity for it would blur what that one proves.",
     "exempt": "Holds PolicyExempt. Exists only to prove the exemption works and to put a name on who would hold it."
   },
-
   "guards": [
     {
       "id": "push-to-protected-branch",
@@ -102,11 +100,11 @@
       "id": "complete-over-outstanding-rejection",
       "title": "A pull request completes while a reviewer has voted to reject",
       "surface": "api",
-      "identity": "author",
+      "identity": "dissenter",
       "expectDefault": "Allowed",
       "expectHardened": "RefusedByPolicy",
       "severity": "High",
-      "why": "allow_completion_with_rejects_or_waits is the second protection that is off unless someone knows to turn it on. A reviewer who read the change and said no is overridden by the approval count being satisfied elsewhere."
+      "why": "allow_completion_with_rejects_or_waits is the second protection that is off unless someone knows to turn it on. A reviewer who read the change and voted to reject is overridden as long as the approval count is satisfied elsewhere, which is why this guard needs a second voter of its own rather than borrowing one."
     },
     {
       "id": "deploy-without-environment-approval",
@@ -116,7 +114,8 @@
       "expectDefault": "Blocked",
       "expectHardened": "Blocked",
       "severity": "Critical",
-      "why": "An approval that lets the job start and asks afterwards is theatre. The check is that the deployment job did not execute, not that a request appeared -- and 'did not execute' has to be read off the job record, because a pipeline that failed to compile also never deployed."
+      "why": "An approval that lets the job start and asks afterwards is theatre. The check is that the deployment job did not execute, not that a request appeared -- and 'did not execute' has to be read off the job record, because a pipeline that failed to compile also never deployed.",
+      "pipeline": "gated-deploy"
     },
     {
       "id": "policy-exempt-push",
@@ -136,7 +135,8 @@
       "expectDefault": "Masked",
       "expectHardened": "Masked",
       "severity": "Medium",
-      "why": "The baseline everybody has watched work. It is here so the next guard means something: without proving masking works on the plain value, proving it fails on a transformed one is not a finding, it is a broken pipeline."
+      "why": "The baseline everybody has watched work. It is here so the next guard means something: without proving masking works on the plain value, proving it fails on a transformed one is not a finding, it is a broken pipeline.",
+      "pipeline": "secret-masked"
     },
     {
       "id": "secret-masking-defeated-by-transform",
@@ -146,7 +146,8 @@
       "expectDefault": "Leaked",
       "expectHardened": "Leaked",
       "severity": "Finding",
-      "why": "Masking is a string replacement over log output. Encode the value, reverse it, or print it one character at a time and it goes straight through. Expected to leak in both passes: this is not a misconfiguration to fix but a property of how masking works, and a pipeline treating masking as a control against the code it runs is mistaken about what it bought."
+      "why": "Masking is a string replacement over log output. Encode the value, reverse it, or print it one character at a time and it goes straight through. Run as a SEPARATE pipeline from the masking guard on purpose: one run containing both would leak, and a scan of that log would report the masking guard as failed when masking worked exactly as documented. Expected to leak in both passes -- not a misconfiguration to fix but a property of how masking works.",
+      "pipeline": "secret-transformed"
     }
   ]
 }

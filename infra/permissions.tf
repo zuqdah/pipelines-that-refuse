@@ -81,8 +81,9 @@ resource "azuredevops_group_membership" "restricted" {
   group = azuredevops_group.restricted.descriptor
   mode  = "add"
   members = [
-    azuredevops_service_principal_entitlement.drill["author"].descriptor,
-    azuredevops_service_principal_entitlement.drill["reviewer"].descriptor,
+    for name, identity in local.drill_identities :
+    azuredevops_service_principal_entitlement.drill[name].descriptor
+    if !identity.exempt
   ]
 }
 
