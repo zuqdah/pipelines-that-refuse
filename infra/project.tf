@@ -47,6 +47,20 @@ resource "azuredevops_git_repository_file" "pipeline" {
   branch              = "refs/heads/main"
   commit_message      = "Seed ${each.key} before any policy exists"
   overwrite_on_create = true
+
+  lifecycle {
+    # These are seeds, not managed content. The drill deliberately mutates the
+    # repository -- the exempt identity's push to main is a guard passing -- so
+    # by the second apply the files have drifted and Terraform wants to write
+    # them back. That write is a push to main, the hardened policy refuses it
+    # with TF402455, and the run dies reconciling a difference it caused itself.
+    #
+    # Ignoring content is the honest fix: what matters is that the file existed
+    # before any policy did, which is what created it. Granting the
+    # orchestrator PolicyExempt instead would have worked and would have put a
+    # policy bypass in the lab's own control plane to paper over this.
+    ignore_changes = [content, commit_message]
+  }
 }
 
 resource "azuredevops_git_repository_file" "readme" {
@@ -66,6 +80,13 @@ resource "azuredevops_git_repository_file" "readme" {
 
     drill-token: seed
   EOT
+
+  lifecycle {
+    # Same reason as the pipeline files, and this is the one that actually
+    # drifts: every guard that opens a pull request rewrites the drill-token
+    # line, and the exempt identity's successful push to main rewrites it there.
+    ignore_changes = [content, commit_message]
+  }
 }
 
 resource "azuredevops_build_definition" "gated_deploy" {
